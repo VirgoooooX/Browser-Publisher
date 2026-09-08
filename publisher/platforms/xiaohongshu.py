@@ -129,23 +129,26 @@ class XiaohongshuPublisher(BasePlatformPublisher):
     async def capture_qr(self) -> str | None:
         """Locate and capture the login QR code image snippet as base64 PNG."""
         page = await self.get_page()
-        if "/login" not in page.url:
-            await page.goto(
-                XHS_LOGIN_URL,
-                timeout=int(self.settings.navigation_timeout_seconds * 1000),
-                wait_until="domcontentloaded",
-            )
+        try:
+            if "/login" not in page.url:
+                await page.goto(
+                    XHS_LOGIN_URL,
+                    timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                    wait_until="domcontentloaded",
+                )
+        except Exception as exc:
+            logger.debug("xhs_goto_login_failed", error=str(exc))
 
         for selector in QR_SELECTORS:
-            loc = page.locator(selector)
-            if await loc.count() > 0 and await loc.first.is_visible():
-                try:
-                    png_bytes = await loc.first.screenshot(type="png")
-                    return base64.b64encode(png_bytes).decode("ascii")
-                except Exception as exc:
-                    logger.debug(
-                        "xhs_qr_screenshot_failed", selector=selector, error=str(exc)
-                    )
+            try:
+                loc = page.locator(selector).first
+                await loc.wait_for(state="visible", timeout=4000)
+                png_bytes = await loc.screenshot(type="png")
+                return base64.b64encode(png_bytes).decode("ascii")
+            except Exception as exc:
+                logger.debug(
+                    "xhs_qr_screenshot_failed", selector=selector, error=str(exc)
+                )
         return None
 
     async def clear_auth(self) -> None:

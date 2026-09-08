@@ -147,22 +147,34 @@ class WeChatPublisher(BasePlatformPublisher):
     async def capture_qr(self) -> str | None:
         """Locate and capture the login QR code image snippet as base64 PNG."""
         page = await self.get_page()
-        if MP_ORIGIN not in page.url:
-            await page.goto(
-                MP_HOME_URL,
-                timeout=int(self.settings.navigation_timeout_seconds * 1000),
-                wait_until="domcontentloaded",
-            )
+        # If already on home dashboard, there is no QR code
+        if "/cgi-bin/" in page.url and "login" not in page.url:
+            return None
+
+        try:
+            if MP_ORIGIN not in page.url or "login" not in page.url:
+                await page.goto(
+                    MP_HOME_URL,
+                    timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                    wait_until="domcontentloaded",
+                )
+        except Exception as exc:
+            logger.debug("wechat_goto_login_failed", error=str(exc))
+
+        # Re-check if it redirected to authenticated home
+        if "/cgi-bin/" in page.url and "login" not in page.url:
+            return None
+
         for selector in QR_SELECTORS:
-            qr_locator = page.locator(selector)
-            if await qr_locator.count() > 0 and await qr_locator.first.is_visible():
-                try:
-                    png_bytes = await qr_locator.first.screenshot(type="png")
-                    return base64.b64encode(png_bytes).decode("ascii")
-                except Exception as exc:
-                    logger.debug(
-                        "wechat_qr_screenshot_failed", selector=selector, error=str(exc)
-                    )
+            try:
+                qr_locator = page.locator(selector).first
+                await qr_locator.wait_for(state="visible", timeout=4000)
+                png_bytes = await qr_locator.screenshot(type="png")
+                return base64.b64encode(png_bytes).decode("ascii")
+            except Exception as exc:
+                logger.debug(
+                    "wechat_qr_screenshot_failed", selector=selector, error=str(exc)
+                )
         return None
 
     async def clear_auth(self) -> None:

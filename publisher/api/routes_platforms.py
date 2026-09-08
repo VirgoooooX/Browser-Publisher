@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Annotated, Any
 
@@ -17,6 +18,14 @@ router = APIRouter(
     tags=["platforms"],
     dependencies=[Depends(require_console_auth)],
 )
+
+_platform_locks: dict[str, asyncio.Lock] = {}
+
+
+def get_platform_lock(platform: str) -> asyncio.Lock:
+    if platform not in _platform_locks:
+        _platform_locks[platform] = asyncio.Lock()
+    return _platform_locks[platform]
 
 
 def get_db(request: Request) -> object:
@@ -60,34 +69,36 @@ async def request_platform_login(
             status_code=404, detail=f"Platform '{platform}' not configured"
         )
 
-    is_logged_in = await pub.check_login()
-    async with session_factory() as session:
-        if is_logged_in:
+    lock = get_platform_lock(platform)
+    async with lock:
+        is_logged_in = await pub.check_login()
+        async with session_factory() as session:
+            if is_logged_in:
+                await session.execute(
+                    update(PlatformState)
+                    .where(PlatformState.platform == platform)
+                    .values(
+                        session_state="ready",
+                        qr_code_base64=None,
+                        alert_incident_id=None,
+                        updated_at=utc_now(),
+                    )
+                )
+                await session.commit()
+                return {"platform": platform, "status": "already_authenticated"}
+
+            qr_b64 = await pub.capture_qr()
             await session.execute(
                 update(PlatformState)
                 .where(PlatformState.platform == platform)
                 .values(
-                    session_state="ready",
-                    qr_code_base64=None,
-                    alert_incident_id=None,
+                    session_state="auth_required",
+                    qr_code_base64=qr_b64,
                     updated_at=utc_now(),
                 )
             )
             await session.commit()
-            return {"platform": platform, "status": "already_authenticated"}
-
-        qr_b64 = await pub.capture_qr()
-        await session.execute(
-            update(PlatformState)
-            .where(PlatformState.platform == platform)
-            .values(
-                session_state="auth_required",
-                qr_code_base64=qr_b64,
-                updated_at=utc_now(),
-            )
-        )
-        await session.commit()
-        return {"platform": platform, "status": "auth_required", "has_qr": bool(qr_b64)}
+            return {"platform": platform, "status": "auth_required", "has_qr": bool(qr_b64)}
 
 
 @router.get(
@@ -138,20 +149,22 @@ async def reauth_platform(
             status_code=404, detail=f"Platform '{platform}' not configured"
         )
 
-    await pub.clear_auth()
-    qr_b64 = await pub.capture_qr()
+    lock = get_platform_lock(platform)
+    async with lock:
+        await pub.clear_auth()
+        qr_b64 = await pub.capture_qr()
 
-    async with session_factory() as session:
-        await session.execute(
-            update(PlatformState)
-            .where(PlatformState.platform == platform)
-            .values(
-                session_state="auth_required",
-                qr_code_base64=qr_b64,
-                updated_at=utc_now(),
+        async with session_factory() as session:
+            await session.execute(
+                update(PlatformState)
+                .where(PlatformState.platform == platform)
+                .values(
+                    session_state="auth_required",
+                    qr_code_base64=qr_b64,
+                    updated_at=utc_now(),
+                )
             )
-        )
-        await session.commit()
+            await session.commit()
 
     return {"platform": platform, "status": "auth_cleared_reauth_initiated"}
 
