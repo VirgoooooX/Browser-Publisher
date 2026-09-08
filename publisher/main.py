@@ -20,6 +20,7 @@ from publisher.config import PublisherSettings
 from publisher.database import Base, create_engine_and_sessionmaker
 from publisher.models import PlatformState, utc_now
 from publisher.platforms.fake import FakePublisher
+from publisher.platforms.wechat import WeChatPublisher
 from publisher.worker.serial_worker import SerialWorker
 
 logger = structlog.get_logger()
@@ -55,10 +56,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await session.commit()
 
     # 2. Platform publishers registry
-    # In Phase 1 we wire up FakePublisher for both platforms unless real ones are injected.
     if not hasattr(app.state, "publishers") or not app.state.publishers:
         app.state.publishers = {
-            "wechat_mp": FakePublisher(settings),
+            "wechat_mp": WeChatPublisher(settings),
             "xiaohongshu": FakePublisher(settings),
         }
 
