@@ -19,8 +19,10 @@ from publisher.api.routes_platforms import router as platforms_router
 from publisher.config import PublisherSettings
 from publisher.database import Base, create_engine_and_sessionmaker
 from publisher.models import PlatformState, utc_now
+from publisher.platforms.browser import BrowserManager
 from publisher.platforms.fake import FakePublisher
 from publisher.platforms.wechat import WeChatPublisher
+from publisher.platforms.xiaohongshu import XiaohongshuPublisher
 from publisher.worker.serial_worker import SerialWorker
 
 logger = structlog.get_logger()
@@ -55,14 +57,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 )
         await session.commit()
 
-    # 2. Platform publishers registry
+    # 2. Shared persistent browser context manager
+    browser_manager = BrowserManager(settings)
+    app.state.browser_manager = browser_manager
+
+    # 3. Platform publishers registry
     if not hasattr(app.state, "publishers") or not app.state.publishers:
         app.state.publishers = {
-            "wechat_mp": WeChatPublisher(settings),
-            "xiaohongshu": FakePublisher(settings),
+            "wechat_mp": WeChatPublisher(settings, browser_manager=browser_manager),
+            "xiaohongshu": XiaohongshuPublisher(settings, browser_manager=browser_manager),
         }
 
-    # 3. Serial Worker
+    # 4. Serial Worker
     worker = SerialWorker(
         settings=settings,
         session_factory=session_factory,
@@ -78,6 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         logger.info("publisher_application_shutting_down")
         await worker.stop()
+        await browser_manager.close()
         await engine.dispose()
 
 
