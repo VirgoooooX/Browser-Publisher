@@ -26,6 +26,7 @@ XHS_PUBLISH_URL = f"{XHS_ORIGIN}/publish/publish"
 XHS_MANAGE_URL = f"{XHS_ORIGIN}/manage/note"
 
 QR_SELECTORS = [
+    'img[src^="data:image"]',
     ".qrcode-img",
     "img.qrcode",
     ".qrcode-wrapper img",
@@ -46,10 +47,18 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         self._context: Any = None
         self._active_page: Any = None
 
-    async def start(self) -> None:
-        """Initialize browser context via shared BrowserManager or direct launch."""
+    async def _get_context(self) -> Any:
         if self._browser_manager is not None:
-            await self._browser_manager.get_context()
+            self._context = await self._browser_manager.get_context()
+            return self._context
+        if self._context is None:
+            await self.start()
+        return self._context
+
+    async def start(self) -> None:
+        """Launch persistent browser context."""
+        if self._browser_manager is not None:
+            self._context = await self._browser_manager.get_context()
             return
 
         from playwright.async_api import async_playwright
@@ -68,17 +77,21 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         )
 
     async def close(self) -> None:
-        """Close browser context if owned."""
+        """Close browser context."""
         if self._browser_manager is not None:
             return
 
         if self._context is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._context.close()
+            except Exception as exc:
+                logger.debug("xhs_browser_context_close_failed", error=str(exc))
             self._context = None
         if self._playwright is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._playwright.stop()
+            except Exception as exc:
+                logger.debug("xhs_playwright_stop_failed", error=str(exc))
             self._playwright = None
         self._active_page = None
 
@@ -87,25 +100,31 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             return await self._browser_manager.get_page()
 
         if not self._context:
-            raise RuntimeError("Playwright context not initialized")
+            raise RuntimeError("Playwright browser context is not initialized")
         pages = self._context.pages
         self._active_page = pages[0] if pages else await self._context.new_page()
         return self._active_page
 
     async def check_login(self) -> bool:
-        """Navigate to XHS creator center and check if authenticated."""
+        """Navigate to Xiaohongshu creator center and check if session is authenticated."""
         page = await self.get_page()
         try:
-            if XHS_ORIGIN not in page.url:
+            if XHS_ORIGIN not in page.url or "/login" in page.url:
                 await page.goto(
-                    XHS_HOME_URL,
+                    XHS_MANAGE_URL,
                     timeout=int(self.settings.navigation_timeout_seconds * 1000),
                     wait_until="domcontentloaded",
                 )
             url = page.url
-            # If redirected to login page, user is not logged in
             if "/login" in url:
                 return False
+
+            if hasattr(page, "title"):
+                title = page.title()
+                if asyncio.iscoroutine(title) or hasattr(title, "__await__"):
+                    title = await title
+                if isinstance(title, str) and "页面不见了" in title:
+                    return False
 
             # Check for creator center logged-in indicators
             for sel in [
@@ -114,14 +133,11 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                 ".header-user",
                 'a:has-text("发布作品")',
                 'button:has-text("发布作品")',
-                'span:has-text("创作者服务平台")',
+                'span:has-text("笔记管理")',
             ]:
                 loc = page.locator(sel)
                 if await loc.count() > 0 and await loc.first.is_visible():
                     return True
-
-            if "/creator/" in url or "/publish/" in url or "/manage/" in url:
-                return True
         except Exception as exc:
             logger.debug("xhs_check_login_failed", error=str(exc))
         return False
@@ -139,10 +155,23 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         except Exception as exc:
             logger.debug("xhs_goto_login_failed", error=str(exc))
 
+        # Dismiss agreement popup if visible
+        for text in ["同意并继续", "同意"]:
+            try:
+                agree_btn = page.get_by_text(text, exact=True)
+                if await agree_btn.count() > 0 and await agree_btn.first.is_visible():
+                    await agree_btn.first.click()
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
+
         for selector in QR_SELECTORS:
             try:
                 loc = page.locator(selector).first
-                await loc.wait_for(state="visible", timeout=4000)
+                await loc.wait_for(state="visible", timeout=3000)
+                src = await loc.get_attribute("src")
+                if src and "data:image" in src and "base64," in src:
+                    return src.split("base64,", 1)[1]
                 png_bytes = await loc.screenshot(type="png")
                 return base64.b64encode(png_bytes).decode("ascii")
             except Exception as exc:

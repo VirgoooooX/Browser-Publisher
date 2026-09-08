@@ -17,6 +17,7 @@ async def test_xhs_check_login_success(test_settings: PublisherSettings) -> None
     pub = XiaohongshuPublisher(test_settings)
     mock_page = MagicMock()
     mock_page.url = "https://creator.xiaohongshu.com/creator/home"
+    mock_page.title = AsyncMock(return_value="小红书创作者服务平台")
 
     mock_loc = AsyncMock()
     mock_loc.count.return_value = 1

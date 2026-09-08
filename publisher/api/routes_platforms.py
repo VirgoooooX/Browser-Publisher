@@ -98,7 +98,12 @@ async def request_platform_login(
                 )
             )
             await session.commit()
-            return {"platform": platform, "status": "auth_required", "has_qr": bool(qr_b64)}
+            return {
+                "platform": platform,
+                "status": "auth_required",
+                "has_qr": bool(qr_b64),
+                "qr_code_base64": qr_b64,
+            }
 
 
 @router.get(
