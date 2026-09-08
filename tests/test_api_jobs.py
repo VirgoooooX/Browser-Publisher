@@ -98,7 +98,9 @@ async def test_xhs_validation_rules(client: AsyncClient) -> None:
     assert "requires between 1 and 18 media images" in resp2.text
 
     # 3. Media > 18 images rejected
-    too_many_media = [{"kind": "url", "url": f"https://example.com/{i}.jpg"} for i in range(19)]
+    too_many_media = [
+        {"kind": "url", "url": f"https://example.com/{i}.jpg"} for i in range(19)
+    ]
     resp3 = await client.post(
         "/v1/jobs",
         json={

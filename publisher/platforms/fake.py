@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob
@@ -27,6 +26,7 @@ class FakePublisher(BasePlatformPublisher):
 
         # Injected behaviors for testing
         self.should_fail_save_draft: Exception | None = None
+        self.should_fail_open_draft: Exception | None = None
         self.should_fail_publish: Exception | None = None
         self.should_trigger_security_check: bool = False
         self.should_trigger_rate_limit: bool = False
@@ -61,7 +61,9 @@ class FakePublisher(BasePlatformPublisher):
     ) -> tuple[str, str | None]:
         self.save_draft_calls += 1
         if self.should_trigger_security_check:
-            raise RuntimeError("SECURITY_CHECK_TRIGGERED: Fake security verification required")
+            raise RuntimeError(
+                "SECURITY_CHECK_TRIGGERED: Fake security verification required"
+            )
         if self.should_trigger_rate_limit:
             raise RuntimeError("RATE_LIMIT_TRIGGERED: Fake rate limit exceeded")
         if self.should_fail_save_draft:
@@ -73,17 +75,23 @@ class FakePublisher(BasePlatformPublisher):
 
     async def open_draft(self, draft_url: str) -> None:
         self.open_draft_calls += 1
+        if self.should_fail_open_draft:
+            raise self.should_fail_open_draft
 
     async def publish_and_confirm(self, job: PublishJob) -> None:
         self.publish_and_confirm_calls += 1
         if self.should_trigger_security_check:
-            raise RuntimeError("SECURITY_CHECK_TRIGGERED: Fake security verification required")
+            raise RuntimeError(
+                "SECURITY_CHECK_TRIGGERED: Fake security verification required"
+            )
         if self.should_trigger_rate_limit:
             raise RuntimeError("RATE_LIMIT_TRIGGERED: Fake rate limit exceeded")
         if self.should_fail_publish:
             raise self.should_fail_publish
 
-    async def verify_published(self, job: PublishJob, start_time: datetime) -> str | None:
+    async def verify_published(
+        self, job: PublishJob, start_time: datetime
+    ) -> str | None:
         self.verify_published_calls += 1
         return self.published_url_to_return
 

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.50.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -15,11 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir .
-
 COPY publisher ./publisher
 COPY alembic ./alembic
 COPY alembic.ini ./
+
+RUN pip install --no-cache-dir .
 
 RUN mkdir -p /app/data /app/data/profile /app/data/media /app/data/artifacts
 

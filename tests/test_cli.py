@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -64,4 +62,3 @@ def test_cli_resume_command(capsys: pytest.CaptureFixture[str]) -> None:
 
     captured = capsys.readouterr().out
     assert "Platform xiaohongshu risk pause successfully resumed" in captured
-

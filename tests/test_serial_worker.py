@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from publisher.config import PublisherSettings
@@ -87,6 +84,7 @@ async def test_worker_publish_mode(
     processed = await worker._run_next_eligible_job()
     assert processed is True
     assert pub.save_draft_calls == 1
+    assert pub.open_draft_calls == 1
     assert pub.publish_and_confirm_calls == 1
     assert pub.verify_published_calls == 1
 
@@ -95,6 +93,174 @@ async def test_worker_publish_mode(
         assert j is not None
         assert j.status == "published"
         assert j.final_url == "https://example.com/item/123"
+
+
+@pytest.mark.asyncio
+async def test_xhs_fresh_publish_keeps_current_editor_page(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"xiaohongshu": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="xhs-publish-current-page-01",
+                platform="xiaohongshu",
+                mode="publish",
+                status="queued",
+                content={"title": "小红书发布", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 1
+    assert pub.open_draft_calls == 0
+    assert pub.publish_and_confirm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_draft_saved_without_platform_id_resumes_without_new_draft(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="resume-without-draft-id-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                publish_phase="draft_saved",
+                platform_draft_id=None,
+                final_url="https://mp.weixin.qq.com/cgi-bin/appmsg?id=1",
+                content={"title": "恢复草稿", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 0
+    assert pub.open_draft_calls == 1
+    assert pub.publish_and_confirm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_open_saved_draft_retry_preserves_phase_and_does_not_duplicate(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    pub.should_fail_open_draft = RuntimeError("NETWORK_ERROR: temporary failure")
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="retry-saved-draft-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                publish_phase="draft_saved",
+                final_url="https://mp.weixin.qq.com/cgi-bin/appmsg?id=1",
+                content={"title": "重试草稿", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    async with session_factory() as session:
+        failed_once = await session.get(PublishJob, job_id)
+        assert failed_once is not None
+        assert failed_once.status == "queued"
+        assert failed_once.publish_phase == "draft_saved"
+
+    pub.should_fail_open_draft = None
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 0
+    assert pub.open_draft_calls == 2
+    assert pub.publish_and_confirm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_in_flight_publish_failure_switches_to_reconcile_and_reconciles(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    """If publish_and_confirm throws in-flight, job must switch to reconciling, NOT fail immediately without check."""
+    engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    pub.should_fail_publish = RuntimeError(
+        "Simulated network timeout during final click"
+    )
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        job = PublishJob(
+            id=job_id,
+            client_request_id="in-flight-fail-01",
+            platform="wechat_mp",
+            mode="publish",
+            status="queued",
+            content={"title": "发布中途异常测试", "body_text": "正文"},
+            media=[],
+            topics=[],
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        session.add(job)
+        await session.commit()
+
+    # 1. Run first execution: fails during publish_and_confirm
+    processed = await worker._run_next_eligible_job()
+    assert processed is True
+    assert pub.publish_and_confirm_calls == 1
+
+    # 2. Check that job was switched to reconciling and requeued
+    async with session_factory() as session:
+        j = await session.get(PublishJob, job_id)
+        assert j is not None
+        assert j.status == "queued"
+        assert j.publish_phase == "reconciling"
+
+    # 3. Next execution runs reconciliation only (NEVER clicks publish again)
+    pub.should_fail_publish = None
+    processed2 = await worker._run_next_eligible_job()
+    assert processed2 is True
+    assert pub.publish_and_confirm_calls == 1  # Still 1! Never re-clicked
+    assert pub.reconcile_calls == 1
+
+    async with session_factory() as session:
+        j = await session.get(PublishJob, job_id)
+        assert j is not None
+        assert j.status == "published"
 
 
 @pytest.mark.asyncio
@@ -118,6 +284,57 @@ async def test_recovery_from_publish_clicked_never_clicks_again(
             publish_phase="publish_clicked",  # had clicked publish before crash
             attempt_count=1,
             content={"title": "崩溃恢复测试", "body_text": "正文"},
+            media=[],
+            topics=[],
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        session.add(job)
+        await session.commit()
+
+    # 1. Run recovery
+    await worker._recover_running_jobs()
+
+    # 2. Check that phase was transitioned to reconciling
+    async with session_factory() as session:
+        j = await session.get(PublishJob, job_id)
+        assert j is not None
+        assert j.status == "queued"
+        assert j.publish_phase == "reconciling"
+
+    # 3. Process job
+    processed = await worker._run_next_eligible_job()
+    assert processed is True
+    assert pub.publish_and_confirm_calls == 0  # Crucial! NEVER clicked publish again
+    assert pub.reconcile_calls == 1
+
+    async with session_factory() as session:
+        j = await session.get(PublishJob, job_id)
+        assert j is not None
+        assert j.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_recovery_from_publish_intent_never_clicks_again(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    """If service crashed after publish_intent was written, recovery must ONLY reconcile and NEVER click publish."""
+    engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        job = PublishJob(
+            id=job_id,
+            client_request_id="crash-recovery-intent-01",
+            platform="wechat_mp",
+            mode="publish",
+            status="running",  # stuck in running
+            publish_phase="publish_intent",  # crashed right around final publish click
+            attempt_count=1,
+            content={"title": "意图崩溃恢复测试", "body_text": "正文"},
             media=[],
             topics=[],
             created_at=utc_now(),
@@ -305,4 +522,3 @@ async def test_publish_unknown_when_unconfirmed(
         assert j.status == "publish_unknown"
         assert j.publish_phase == "publish_clicked"
         assert j.error_code == "PUBLISH_RESULT_UNKNOWN"
-

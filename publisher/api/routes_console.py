@@ -5,11 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from publisher.config import PublisherSettings
 from publisher.models import PlatformState, PublishJob
@@ -34,7 +33,9 @@ def get_db(request: Request) -> object:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request=request, name="login.html", context={"error": None})
+    return templates.TemplateResponse(
+        request=request, name="login.html", context={"error": None}
+    )
 
 
 @router.post("/console/login")

@@ -78,7 +78,9 @@ class JobCreateRequest(BaseModel):
                     f"Xiaohongshu note title cannot exceed 20 characters (got {len(title)}: '{title}')"
                 )
             if not body_text:
-                raise ValueError("Xiaohongshu publishing requires non-empty 'body_text'")
+                raise ValueError(
+                    "Xiaohongshu publishing requires non-empty 'body_text'"
+                )
             if len(body_text) > 1000:
                 raise ValueError(
                     f"Xiaohongshu note body cannot exceed 1000 characters (got {len(body_text)})"
@@ -94,8 +96,12 @@ class JobCreateRequest(BaseModel):
                 raise ValueError(
                     f"WeChat Official Account title cannot exceed 64 characters (got {len(title)}: '{title}')"
                 )
-            if not body_text and not (self.content.body_html and self.content.body_html.strip()):
-                raise ValueError("WeChat Official Account requires either body_text or body_html")
+            if not body_text and not (
+                self.content.body_html and self.content.body_html.strip()
+            ):
+                raise ValueError(
+                    "WeChat Official Account requires either body_text or body_html"
+                )
 
         return self
 

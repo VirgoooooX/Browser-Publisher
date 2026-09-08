@@ -16,7 +16,7 @@ services:
       PUBLISHER_NOTIFY_API_KEY: "${PUBLISHER_NOTIFY_API_KEY:-}"
       PUBLISHER_NOTIFY_RECIPIENT_IDS: "${PUBLISHER_NOTIFY_RECIPIENT_IDS:-}"
     ports:
-      - "8790:8790"
+      - "${PUBLISHER_BIND_IP:-0.0.0.0}:8790:8790"
     volumes:
       - ./data:/app/data
     shm_size: "1gb"

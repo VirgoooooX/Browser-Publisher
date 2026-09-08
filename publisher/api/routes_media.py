@@ -7,14 +7,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from publisher.config import PublisherSettings
 from publisher.models import MediaAsset, generate_id, utc_now
 from publisher.schemas import MediaUploadResponse
-from publisher.security import require_api_auth
+from publisher.security import require_console_auth
 
-router = APIRouter(prefix="/v1/media", tags=["media"])
+router = APIRouter(
+    prefix="/v1/media",
+    tags=["media"],
+    dependencies=[Depends(require_console_auth)],
+)
 
 ALLOWED_MIME_TYPES = {
     "image/jpeg": ".jpg",
@@ -37,7 +40,6 @@ def get_settings(request: Request) -> PublisherSettings:
     "",
     response_model=MediaUploadResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_api_auth)],
 )
 async def upload_media(
     file: Annotated[UploadFile, File(description="Image file (JPG, PNG, WebP)")],
@@ -53,7 +55,9 @@ async def upload_media(
 
     content = await file.read()
     if len(content) == 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file uploaded")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file uploaded"
+        )
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob
@@ -54,7 +53,9 @@ class BasePlatformPublisher(ABC):
         """Click the publish button and confirm final publication modal."""
 
     @abstractmethod
-    async def verify_published(self, job: PublishJob, start_time: datetime) -> str | None:
+    async def verify_published(
+        self, job: PublishJob, start_time: datetime
+    ) -> str | None:
         """Verify publication success right after publish click and return public article/note URL."""
 
     @abstractmethod

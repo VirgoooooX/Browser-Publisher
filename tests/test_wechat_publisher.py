@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from publisher.config import PublisherSettings
-from publisher.models import PublishJob, generate_id, utc_now
-from publisher.platforms.render import render_body, render_wechat_html
+from publisher.platforms.render import render_wechat_html
 from publisher.platforms.wechat import WeChatPublisher
 
 
@@ -49,6 +49,24 @@ def test_render_wechat_html_strips_duplicate_h1_and_cleans_quotes() -> None:
     assert "https://x.com/user/status/123" in html
 
 
+def test_render_wechat_html_standalone_quote_arrow() -> None:
+    raw_markdown = """> 第一段引用
+>
+> 第二段引用包含单独一行的箭头
+
+正文内容。
+"""
+    html = render_wechat_html(
+        content=raw_markdown,
+        strip_title_heading=True,
+    )
+
+    assert "<blockquote" in html
+    assert "&gt;" not in html
+    assert "第一段引用" in html
+    assert "第二段引用包含单独一行的箭头" in html
+
+
 @pytest.mark.asyncio
 async def test_wechat_check_login_success(test_settings: PublisherSettings) -> None:
     publisher = WeChatPublisher(test_settings)
@@ -78,7 +96,9 @@ async def test_wechat_check_login_failure(test_settings: PublisherSettings) -> N
 
 
 @pytest.mark.asyncio
-async def test_wechat_check_risk_control_rate_limit(test_settings: PublisherSettings) -> None:
+async def test_wechat_check_risk_control_rate_limit(
+    test_settings: PublisherSettings,
+) -> None:
     publisher = WeChatPublisher(test_settings)
     mock_page = MagicMock()
 
@@ -93,7 +113,9 @@ async def test_wechat_check_risk_control_rate_limit(test_settings: PublisherSett
 
 
 @pytest.mark.asyncio
-async def test_wechat_check_risk_control_security_check(test_settings: PublisherSettings) -> None:
+async def test_wechat_check_risk_control_security_check(
+    test_settings: PublisherSettings,
+) -> None:
     publisher = WeChatPublisher(test_settings)
     mock_page = MagicMock()
 
@@ -115,3 +137,117 @@ async def test_wechat_check_risk_control_security_check(test_settings: Publisher
 
     with pytest.raises(RuntimeError, match="SECURITY_CHECK_TRIGGERED"):
         await publisher.check_risk_control(mock_page)
+
+
+@pytest.mark.asyncio
+async def test_wechat_open_editor_with_shared_browser_manager(
+    test_settings: PublisherSettings,
+) -> None:
+    """Verify open_editor gets context from BrowserManager without AttributeError."""
+    mock_browser_manager = MagicMock()
+    mock_context = MagicMock()
+    mock_browser_manager.get_context = AsyncMock(return_value=mock_context)
+
+    publisher = WeChatPublisher(test_settings, browser_manager=mock_browser_manager)
+
+    mock_editor_page = MagicMock()
+    mock_editor_page.wait_for_load_state = AsyncMock()
+
+    class AsyncPageContextManager:
+        async def __aenter__(self) -> Any:
+            fut: asyncio.Future[Any] = asyncio.Future()
+            fut.set_result(mock_editor_page)
+            val = MagicMock()
+            val.value = fut
+            return val
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+    mock_context.expect_page.return_value = AsyncPageContextManager()
+
+    mock_home_page = MagicMock()
+    mock_home_page.url = "https://mp.weixin.qq.com/cgi-bin/home?t=home/index"
+    article_btn = AsyncMock()
+    article_btn.count.return_value = 1
+    article_btn.first.is_visible.return_value = True
+    article_btn.first.click = AsyncMock()
+    mock_home_page.locator.return_value = article_btn
+
+    editor_page = await publisher.open_editor(mock_home_page)
+    assert editor_page == mock_editor_page
+    mock_context.expect_page.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_wechat_publish_disables_group_notice_and_accepts_no_declaration(
+    test_settings: PublisherSettings,
+) -> None:
+    publisher = WeChatPublisher(test_settings)
+    publisher.check_risk_control = AsyncMock()  # type: ignore[method-assign]
+    publisher._disable_group_notification = AsyncMock()  # type: ignore[method-assign]
+
+    page = MagicMock()
+    entry = MagicMock()
+    entry.first = entry
+    entry.count = AsyncMock(return_value=1)
+    entry.is_visible = AsyncMock(return_value=True)
+    entry.inner_text = AsyncMock(return_value="发表")
+    entry.click = AsyncMock()
+    page.locator.return_value = entry
+
+    publish_button = MagicMock()
+    publish_button.click = AsyncMock()
+    no_declaration_button = MagicMock()
+    no_declaration_button.click = AsyncMock()
+
+    stage = 0
+
+    async def click_publish() -> None:
+        nonlocal stage
+        stage = 1
+
+    publish_button.click.side_effect = click_publish
+
+    async def visible_button(_page: Any, names: list[str]) -> Any | None:
+        if "无需声明并发表" in names and stage == 1:
+            return no_declaration_button
+        if "发表" in names and stage == 0:
+            return publish_button
+        return None
+
+    publisher._visible_button = AsyncMock(side_effect=visible_button)  # type: ignore[method-assign]
+    page.get_by_text.return_value = MagicMock(
+        count=AsyncMock(return_value=0),
+        first=MagicMock(is_visible=AsyncMock(return_value=False)),
+    )
+
+    with patch.object(publisher, "get_page", new_callable=AsyncMock) as get_page:
+        get_page.return_value = page
+        await publisher.publish_and_confirm(MagicMock())
+
+    entry.click.assert_awaited_once()
+    publisher._disable_group_notification.assert_awaited_once_with(page)
+    publish_button.click.assert_awaited_once()
+    no_declaration_button.click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wechat_disables_enabled_group_notification() -> None:
+    page = MagicMock()
+    label = MagicMock()
+    label.first = label
+    label.count = AsyncMock(return_value=1)
+    label.is_visible = AsyncMock(return_value=True)
+    row = MagicMock()
+    enabled_switch = MagicMock()
+    enabled_switch.first = enabled_switch
+    enabled_switch.count = AsyncMock(return_value=1)
+    enabled_switch.click = AsyncMock()
+    label.locator.return_value = row
+    row.locator.return_value = enabled_switch
+    page.get_by_text.return_value = label
+
+    await WeChatPublisher._disable_group_notification(page)
+
+    enabled_switch.click.assert_awaited_once_with(force=True)

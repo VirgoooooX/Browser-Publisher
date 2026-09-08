@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import base64
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from publisher.models import PlatformState, utc_now
 from publisher.schemas import PlatformDetail, PlatformListResponse, PlatformType
-from publisher.security import require_api_auth
+from publisher.security import require_console_auth
 
-router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
+router = APIRouter(
+    prefix="/v1/platforms",
+    tags=["platforms"],
+    dependencies=[Depends(require_console_auth)],
+)
 
 
 def get_db(request: Request) -> object:
@@ -27,7 +30,6 @@ def get_publishers(request: Request) -> dict[str, object]:
 @router.get(
     "",
     response_model=PlatformListResponse,
-    dependencies=[Depends(require_api_auth)],
 )
 async def list_platforms(
     session_factory: Annotated[object, Depends(get_db)],
@@ -46,7 +48,6 @@ async def list_platforms(
 
 @router.post(
     "/{platform}/login",
-    dependencies=[Depends(require_api_auth)],
 )
 async def request_platform_login(
     platform: PlatformType,
@@ -55,7 +56,9 @@ async def request_platform_login(
 ) -> dict[str, Any]:
     pub = publishers.get(platform)
     if not pub:
-        raise HTTPException(status_code=404, detail=f"Platform '{platform}' not configured")
+        raise HTTPException(
+            status_code=404, detail=f"Platform '{platform}' not configured"
+        )
 
     is_logged_in = await pub.check_login()
     async with session_factory() as session:
@@ -123,7 +126,6 @@ async def get_platform_qr(
 
 @router.post(
     "/{platform}/reauth",
-    dependencies=[Depends(require_api_auth)],
 )
 async def reauth_platform(
     platform: PlatformType,
@@ -132,7 +134,9 @@ async def reauth_platform(
 ) -> dict[str, str]:
     pub = publishers.get(platform)
     if not pub:
-        raise HTTPException(status_code=404, detail=f"Platform '{platform}' not configured")
+        raise HTTPException(
+            status_code=404, detail=f"Platform '{platform}' not configured"
+        )
 
     await pub.clear_auth()
     qr_b64 = await pub.capture_qr()
@@ -154,7 +158,6 @@ async def reauth_platform(
 
 @router.post(
     "/{platform}/resume",
-    dependencies=[Depends(require_api_auth)],
 )
 async def resume_platform(
     platform: PlatformType,

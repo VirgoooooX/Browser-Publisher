@@ -20,7 +20,6 @@ from publisher.config import PublisherSettings
 from publisher.database import Base, create_engine_and_sessionmaker
 from publisher.models import PlatformState, utc_now
 from publisher.platforms.browser import BrowserManager
-from publisher.platforms.fake import FakePublisher
 from publisher.platforms.wechat import WeChatPublisher
 from publisher.platforms.xiaohongshu import XiaohongshuPublisher
 from publisher.worker.serial_worker import SerialWorker
@@ -65,7 +64,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if not hasattr(app.state, "publishers") or not app.state.publishers:
         app.state.publishers = {
             "wechat_mp": WeChatPublisher(settings, browser_manager=browser_manager),
-            "xiaohongshu": XiaohongshuPublisher(settings, browser_manager=browser_manager),
+            "xiaohongshu": XiaohongshuPublisher(
+                settings, browser_manager=browser_manager
+            ),
         }
 
     # 4. Serial Worker

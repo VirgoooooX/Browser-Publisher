@@ -30,7 +30,8 @@ def _render_heading(line: str) -> str:
 
 def _render_list(lines: list[str]) -> str:
     items = "".join(
-        f'<li style="{LIST_ITEM_STYLE}">{_escape(line.lstrip("- ").strip())}</li>' for line in lines
+        f'<li style="{LIST_ITEM_STYLE}">{_escape(line.lstrip("- ").strip())}</li>'
+        for line in lines
     )
     return f'<ul style="{LIST_STYLE}">{items}</ul>'
 
@@ -63,10 +64,12 @@ def render_body(content: str, *, strip_first_h1: bool = False) -> str:
             first_heading_checked = True
             parts.append(_render_heading(line))
             index += 1
-        elif line.startswith("> "):
+        elif line.startswith("> ") or line == ">":
             first_heading_checked = True
             block: list[str] = []
-            while index < len(lines) and lines[index].strip().startswith("> "):
+            while index < len(lines) and (
+                lines[index].strip().startswith("> ") or lines[index].strip() == ">"
+            ):
                 block.append(lines[index])
                 index += 1
             parts.append(_render_blockquote(block))

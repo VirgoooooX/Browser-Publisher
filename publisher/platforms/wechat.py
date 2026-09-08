@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -36,19 +37,37 @@ CONFIRM_BUTTON_NAMES = [
     "确认",
     "确定",
 ]
+NO_DECLARATION_BUTTON_NAMES = ["无需声明并发表", "无需声明并群发"]
+DECLARATION_PROMPT_TEXT = "若你发表的内容涉及"
 
 
 class WeChatPublisher(BasePlatformPublisher):
     """Automates article draft creation, cover selection, and publication on WeChat MP."""
 
-    def __init__(self, settings: PublisherSettings) -> None:
+    def __init__(
+        self, settings: PublisherSettings, browser_manager: Any = None
+    ) -> None:
         super().__init__(settings)
+        self._browser_manager = browser_manager
         self._playwright: Any = None
         self._context: Any = None
         self._active_page: Any = None
 
+    async def get_context(self) -> Any:
+        """Return the shared or dedicated browser context."""
+        if self._browser_manager is not None:
+            self._context = await self._browser_manager.get_context()
+            return self._context
+        if self._context is None:
+            await self.start()
+        return self._context
+
     async def start(self) -> None:
         """Launch persistent browser context with required permissions."""
+        if self._browser_manager is not None:
+            self._context = await self._browser_manager.get_context()
+            return
+
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
@@ -68,7 +87,10 @@ class WeChatPublisher(BasePlatformPublisher):
             logger.warning("wechat_failed_to_grant_clipboard_permissions")
 
     async def close(self) -> None:
-        """Close browser context and stop Playwright."""
+        """Close browser context and stop Playwright if owned."""
+        if self._browser_manager is not None:
+            return
+
         if self._context is not None:
             try:
                 await self._context.close()
@@ -84,6 +106,9 @@ class WeChatPublisher(BasePlatformPublisher):
         self._active_page = None
 
     async def get_page(self) -> Any:
+        if self._browser_manager is not None:
+            return await self._browser_manager.get_page()
+
         if not self._context:
             raise RuntimeError("Playwright browser context is not initialized")
         pages = self._context.pages
@@ -135,13 +160,18 @@ class WeChatPublisher(BasePlatformPublisher):
                     png_bytes = await qr_locator.first.screenshot(type="png")
                     return base64.b64encode(png_bytes).decode("ascii")
                 except Exception as exc:
-                    logger.debug("wechat_qr_screenshot_failed", selector=selector, error=str(exc))
+                    logger.debug(
+                        "wechat_qr_screenshot_failed", selector=selector, error=str(exc)
+                    )
         return None
 
     async def clear_auth(self) -> None:
-        """Clear cookies and force navigation away from authenticated state."""
-        if self._context:
-            await self._context.clear_cookies()
+        """Clear cookies for WeChat domain only and force navigation away from authenticated state."""
+        context = await self.get_context()
+        if context:
+            for domain in ["mp.weixin.qq.com", ".weixin.qq.com", ".qq.com"]:
+                with contextlib.suppress(Exception):
+                    await context.clear_cookies(domain=domain)
         page = await self.get_page()
         with contextlib.suppress(Exception):
             await page.goto(
@@ -159,11 +189,17 @@ class WeChatPublisher(BasePlatformPublisher):
                 wait_until="domcontentloaded",
             )
 
-        new_article_btn = page.locator('.new-creation__menu-item:has-text("文章"), .appmsg_edit')
+        new_article_btn = page.locator(
+            '.new-creation__menu-item:has-text("文章"), .appmsg_edit'
+        )
         if await new_article_btn.count() == 0:
             new_article_btn = page.get_by_text("文章", exact=True)
-        if await new_article_btn.count() > 0 and await new_article_btn.first.is_visible():
-            async with self._context.expect_page(timeout=15000) as page_info:
+        if (
+            await new_article_btn.count() > 0
+            and await new_article_btn.first.is_visible()
+        ):
+            context = await self.get_context()
+            async with context.expect_page(timeout=15000) as page_info:
                 await new_article_btn.first.click()
             editor_page = await page_info.value
             await editor_page.wait_for_load_state("domcontentloaded")
@@ -172,7 +208,9 @@ class WeChatPublisher(BasePlatformPublisher):
         if "/cgi-bin/appmsg" in page.url:
             return page
 
-        raise RuntimeError("EDITOR_NOT_FOUND: Could not open article editor from dashboard")
+        raise RuntimeError(
+            "EDITOR_NOT_FOUND: Could not open article editor from dashboard"
+        )
 
     async def fill_article(self, page: Any, job: PublishJob) -> None:
         """Fill title, author, digest, and rich text body into editor."""
@@ -281,7 +319,9 @@ class WeChatPublisher(BasePlatformPublisher):
                     break
 
         if editor_target is None:
-            raise RuntimeError("EDITOR_NOT_FOUND: Rich text editor contenteditable not found")
+            raise RuntimeError(
+                "EDITOR_NOT_FOUND: Rich text editor contenteditable not found"
+            )
 
         await editor_target.click()
         pasted = False
@@ -340,7 +380,10 @@ class WeChatPublisher(BasePlatformPublisher):
             return
 
         from_content_tab = page.locator(':has-text("从正文选择")').last
-        if await from_content_tab.count() == 0 or not await from_content_tab.is_visible():
+        if (
+            await from_content_tab.count() == 0
+            or not await from_content_tab.is_visible()
+        ):
             logger.warning("from_content_tab_not_found_skipping")
             return
         try:
@@ -367,7 +410,9 @@ class WeChatPublisher(BasePlatformPublisher):
         await img_pick.click()
         await asyncio.sleep(0.5)
 
-        next_btn = page.locator('button:has-text("下一步"):not(.weui-desktop-btn_disabled)').first
+        next_btn = page.locator(
+            'button:has-text("下一步"):not(.weui-desktop-btn_disabled)'
+        ).first
         if await next_btn.count() == 0 or not await next_btn.is_visible():
             logger.warning("cover_next_button_not_found_skipping")
             return
@@ -461,7 +506,10 @@ class WeChatPublisher(BasePlatformPublisher):
                                 draft_media_id = str(mid)
                                 save_confirmed = True
                             base_resp = data.get("base_resp") or {}
-                            if isinstance(base_resp, dict) and base_resp.get("ret") == 0:
+                            if (
+                                isinstance(base_resp, dict)
+                                and base_resp.get("ret") == 0
+                            ):
                                 save_confirmed = True
                     except Exception as exc:
                         logger.debug("parse_appmsg_response_failed", error=str(exc))
@@ -472,13 +520,20 @@ class WeChatPublisher(BasePlatformPublisher):
                 start_wait = time.time()
                 max_wait = self.settings.operation_timeout_seconds
                 while time.time() - start_wait < max_wait:
-                    if draft_media_id or "appmsgid=" in editor_page.url or save_confirmed:
+                    if (
+                        draft_media_id
+                        or "appmsgid=" in editor_page.url
+                        or save_confirmed
+                    ):
                         save_confirmed = True
                         break
                     saved_indicator = editor_page.locator(
                         ':has-text("已保存"), :has-text("保存成功"), :has-text("手动保存")'
                     )
-                    if await saved_indicator.count() > 0 and await saved_indicator.first.is_visible():
+                    if (
+                        await saved_indicator.count() > 0
+                        and await saved_indicator.first.is_visible()
+                    ):
                         save_confirmed = True
                         break
                     await asyncio.sleep(0.5)
@@ -493,7 +548,11 @@ class WeChatPublisher(BasePlatformPublisher):
                     draft_media_id = appmsgid_vals[0]
                     save_confirmed = True
 
-            if not save_confirmed and not draft_media_id and "appmsgid=" not in draft_url:
+            if (
+                not save_confirmed
+                and not draft_media_id
+                and "appmsgid=" not in draft_url
+            ):
                 raise RuntimeError(
                     "DRAFT_SAVE_FAILED: Save draft timed out without explicit confirmation"
                 )
@@ -508,13 +567,64 @@ class WeChatPublisher(BasePlatformPublisher):
         """Open previously saved draft by URL with domain validation."""
         parts = urlsplit(draft_url)
         if parts.scheme != "https" or parts.netloc != "mp.weixin.qq.com":
-            raise ValueError(f"DRAFT_SAVE_FAILED: Invalid draft URL domain: {draft_url}")
+            raise ValueError(
+                f"DRAFT_SAVE_FAILED: Invalid draft URL domain: {draft_url}"
+            )
         page = await self.get_page()
         await page.goto(
             draft_url,
             timeout=int(self.settings.navigation_timeout_seconds * 1000),
             wait_until="domcontentloaded",
         )
+
+    @staticmethod
+    async def _visible_button(page: Any, names: list[str]) -> Any | None:
+        for name in names:
+            button = page.locator(
+                f'.weui-desktop-dialog button:text-is("{name}"), '
+                f'.weui-desktop-dialog a[role="button"]:text-is("{name}"), '
+                f'.weui-desktop-modal button:text-is("{name}"), '
+                f'.weui-desktop-modal a[role="button"]:text-is("{name}"), '
+                f'[role="dialog"] button:text-is("{name}"), '
+                f'[role="dialog"] a[role="button"]:text-is("{name}")'
+            )
+            if await button.count() > 0 and await button.first.is_visible():
+                return button.first
+
+            button = page.get_by_role("button", name=name, exact=True)
+            if await button.count() > 0 and await button.first.is_visible():
+                return button.first
+
+            button = page.locator(
+                f'button:text-is("{name}"), '
+                f'a[role="button"]:text-is("{name}"), '
+                f'.weui-desktop-btn:text-is("{name}")'
+            )
+            if await button.count() > 0 and await button.first.is_visible():
+                return button.first
+        return None
+
+    @staticmethod
+    async def _disable_group_notification(page: Any) -> None:
+        label = page.get_by_text("群发通知", exact=True)
+        if await label.count() == 0 or not await label.first.is_visible():
+            return
+
+        row = label.first.locator(
+            "xpath=ancestor::*[.//input[@type='checkbox'] or .//*[@role='switch'] "
+            "or .//*[contains(@class,'switch')]][1]"
+        )
+        enabled_switch = row.locator(
+            'input[type="checkbox"]:checked, '
+            '[role="switch"][aria-checked="true"], '
+            '[class*="switch"][class~="checked"], '
+            '[class*="switch"][class*="is-checked"], '
+            '[class*="switch"][class*="switch_on"], '
+            '[class*="switch"][class*="switch--on"]'
+        ).first
+        if await enabled_switch.count() > 0:
+            await enabled_switch.click(force=True)
+            logger.info("wechat_group_notification_disabled")
 
     async def publish_and_confirm(self, job: PublishJob) -> None:
         """Enter the publish flow and confirm the final publish action."""
@@ -523,15 +633,23 @@ class WeChatPublisher(BasePlatformPublisher):
 
         mass_send_btn = page.locator("button.mass_send")
         entry_name = ""
-        if await mass_send_btn.count() == 0 or not await mass_send_btn.first.is_visible():
+        if (
+            await mass_send_btn.count() == 0
+            or not await mass_send_btn.first.is_visible()
+        ):
             for name in ["下一步", "发表", "群发"]:
                 candidate = page.get_by_role("button", name=name, exact=True)
                 if await candidate.count() > 0 and await candidate.first.is_visible():
                     mass_send_btn = candidate
                     entry_name = name
                     break
-        if await mass_send_btn.count() == 0 or not await mass_send_btn.first.is_visible():
-            raise RuntimeError("PUBLISH_CONFIRM_FAILED: Publish / mass_send button not found")
+        if (
+            await mass_send_btn.count() == 0
+            or not await mass_send_btn.first.is_visible()
+        ):
+            raise RuntimeError(
+                "PUBLISH_CONFIRM_FAILED: Publish / mass_send button not found"
+            )
 
         if not entry_name:
             try:
@@ -540,35 +658,56 @@ class WeChatPublisher(BasePlatformPublisher):
                 entry_name = ""
 
         await mass_send_btn.first.click()
+        await asyncio.sleep(0.5)
         next_step_clicked = entry_name == "下一步"
         ai_declaration_clicked = False
-        deadline = asyncio.get_running_loop().time() + self.settings.operation_timeout_seconds
+        publish_action_clicked = False
+        publish_action_clicked_at = 0.0
+        declaration_prompt_seen = False
+        deadline = (
+            asyncio.get_running_loop().time() + self.settings.operation_timeout_seconds
+        )
 
         while asyncio.get_running_loop().time() < deadline:
             await self.check_risk_control(page)
 
+            no_declaration_btn = await self._visible_button(
+                page, NO_DECLARATION_BUTTON_NAMES
+            )
+            if no_declaration_btn is not None:
+                await no_declaration_btn.click()
+                return
+
+            declaration_prompt = page.get_by_text(DECLARATION_PROMPT_TEXT, exact=False)
+            if (
+                await declaration_prompt.count() > 0
+                and await declaration_prompt.first.is_visible()
+            ):
+                declaration_prompt_seen = True
+
             if not ai_declaration_clicked:
                 for option_name in ["AI 辅助生成", "AI 生成"]:
                     ai_option = page.get_by_text(option_name, exact=True)
-                    if await ai_option.count() > 0 and await ai_option.first.is_visible():
+                    if (
+                        await ai_option.count() > 0
+                        and await ai_option.first.is_visible()
+                    ):
                         await ai_option.first.click()
                         ai_declaration_clicked = True
                         break
 
-            # Older MP pages use a confirmation dialog directly.
-            for name in CONFIRM_BUTTON_NAMES:
-                confirm_btn = page.locator(
-                    f'.weui-desktop-dialog button:has-text("{name}"), '
-                    f'.weui-desktop-modal button:has-text("{name}"), '
-                    f'[role="dialog"] button:has-text("{name}"), '
-                    f'button.weui-desktop-btn_primary:has-text("{name}")'
-                )
-                if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
-                    await confirm_btn.first.click()
-                    return
+            if not publish_action_clicked:
+                await self._disable_group_notification(page)
+                confirm_btn = await self._visible_button(page, CONFIRM_BUTTON_NAMES)
+                if confirm_btn is not None:
+                    await confirm_btn.click()
+                    publish_action_clicked = True
+                    publish_action_clicked_at = asyncio.get_running_loop().time()
+                    await asyncio.sleep(0.5)
+                    continue
 
             # Modern MP editor enters publish page via '下一步'
-            if not next_step_clicked:
+            if not next_step_clicked and not publish_action_clicked:
                 next_btn = page.get_by_role("button", name="下一步", exact=True)
                 if await next_btn.count() > 0 and await next_btn.first.is_visible():
                     await next_btn.first.click()
@@ -576,18 +715,21 @@ class WeChatPublisher(BasePlatformPublisher):
                     await asyncio.sleep(0.5)
                     continue
 
-            if next_step_clicked:
-                for name in CONFIRM_BUTTON_NAMES:
-                    final_btn = page.get_by_role("button", name=name, exact=True)
-                    if await final_btn.count() > 0 and await final_btn.first.is_visible():
-                        await final_btn.first.click()
-                        return
+            if (
+                publish_action_clicked
+                and not declaration_prompt_seen
+                and asyncio.get_running_loop().time() - publish_action_clicked_at >= 2
+            ):
+                # Older pages publish directly without the declaration prompt.
+                return
 
             await asyncio.sleep(0.25)
 
         raise RuntimeError("PUBLISH_CONFIRM_FAILED: Final publish button not found")
 
-    async def verify_published(self, job: PublishJob, start_time: datetime) -> str | None:
+    async def verify_published(
+        self, job: PublishJob, start_time: datetime
+    ) -> str | None:
         """Verify publication success and extract published article URL."""
         return await self.reconcile(job, start_time, max_seconds=30)
 
@@ -605,8 +747,13 @@ class WeChatPublisher(BasePlatformPublisher):
 
         while asyncio.get_event_loop().time() < deadline:
             try:
-                published_tab = page.locator('a:has-text("已发表"), :has-text("已发表")')
-                if await published_tab.count() > 0 and await published_tab.first.is_visible():
+                published_tab = page.locator(
+                    'a:has-text("已发表"), :has-text("已发表")'
+                )
+                if (
+                    await published_tab.count() > 0
+                    and await published_tab.first.is_visible()
+                ):
                     await published_tab.first.click()
                     await asyncio.sleep(1.0)
 
@@ -616,7 +763,9 @@ class WeChatPublisher(BasePlatformPublisher):
                     f'a:has-text("{title}")'
                 )
                 if await item.count() > 0:
-                    link = item.first.locator('a[href*="/s/"], a[href*="mp.weixin.qq.com/s"]')
+                    link = item.first.locator(
+                        'a[href*="/s/"], a[href*="mp.weixin.qq.com/s"]'
+                    )
                     if await link.count() > 0:
                         href = await link.first.get_attribute("href")
                         if href:

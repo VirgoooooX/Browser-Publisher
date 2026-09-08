@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob, generate_id, utc_now
@@ -17,9 +16,13 @@ from publisher.schemas import (
     JobListResponse,
     PublishMode,
 )
-from publisher.security import require_api_auth
+from publisher.security import require_console_auth
 
-router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
+router = APIRouter(
+    prefix="/v1/jobs",
+    tags=["jobs"],
+    dependencies=[Depends(require_console_auth)],
+)
 
 
 def get_db(request: Request) -> object:
@@ -34,7 +37,6 @@ def get_settings(request: Request) -> PublisherSettings:
     "",
     response_model=JobCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_api_auth)],
 )
 async def create_job(
     request_data: JobCreateRequest,
@@ -92,7 +94,6 @@ async def create_job(
 @router.get(
     "",
     response_model=JobListResponse,
-    dependencies=[Depends(require_api_auth)],
 )
 async def list_jobs(
     session_factory: Annotated[object, Depends(get_db)],
@@ -115,7 +116,9 @@ async def list_jobs(
         total = (await session.execute(count_query)).scalar_one()
 
         offset = (page - 1) * page_size
-        query = query.order_by(PublishJob.created_at.desc()).offset(offset).limit(page_size)
+        query = (
+            query.order_by(PublishJob.created_at.desc()).offset(offset).limit(page_size)
+        )
         items = (await session.execute(query)).scalars().all()
 
         return JobListResponse(
@@ -129,7 +132,6 @@ async def list_jobs(
 @router.get(
     "/{job_id}",
     response_model=JobDetailResponse,
-    dependencies=[Depends(require_api_auth)],
 )
 async def get_job(
     job_id: str,
@@ -148,7 +150,6 @@ async def get_job(
 @router.post(
     "/{job_id}/cancel",
     response_model=JobDetailResponse,
-    dependencies=[Depends(require_api_auth)],
 )
 async def cancel_job(
     job_id: str,

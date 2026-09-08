@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -85,6 +84,8 @@ async def client(
     async with AsyncClient(
         transport=transport,
         base_url="http://test",
-        headers={"Authorization": f"Bearer {test_settings.access_token.get_secret_value()}"},
+        headers={
+            "Authorization": f"Bearer {test_settings.access_token.get_secret_value()}"
+        },
     ) as ac:
         yield ac

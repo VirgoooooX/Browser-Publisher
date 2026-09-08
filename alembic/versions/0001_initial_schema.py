@@ -1,10 +1,11 @@
 """Initial schema for publish_jobs, media_assets, platform_states.
 
 Revision ID: 0001_initial_schema
-Revises: 
+Revises:
 Create Date: 2026-09-08 10:00:00.000000
 
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -45,10 +46,19 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_publish_jobs_client_request_id", "publish_jobs", ["client_request_id"], unique=True)
-    op.create_index("ix_publish_jobs_platform", "publish_jobs", ["platform"], unique=False)
+    op.create_index(
+        "ix_publish_jobs_client_request_id",
+        "publish_jobs",
+        ["client_request_id"],
+        unique=True,
+    )
+    op.create_index(
+        "ix_publish_jobs_platform", "publish_jobs", ["platform"], unique=False
+    )
     op.create_index("ix_publish_jobs_status", "publish_jobs", ["status"], unique=False)
-    op.create_index("ix_publish_jobs_created_at", "publish_jobs", ["created_at"], unique=False)
+    op.create_index(
+        "ix_publish_jobs_created_at", "publish_jobs", ["created_at"], unique=False
+    )
 
     # 2. media_assets
     op.create_table(
@@ -63,14 +73,20 @@ def upgrade() -> None:
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_media_assets_checksum", "media_assets", ["checksum"], unique=False)
-    op.create_index("ix_media_assets_created_at", "media_assets", ["created_at"], unique=False)
+    op.create_index(
+        "ix_media_assets_checksum", "media_assets", ["checksum"], unique=False
+    )
+    op.create_index(
+        "ix_media_assets_created_at", "media_assets", ["created_at"], unique=False
+    )
 
     # 3. platform_states
     op.create_table(
         "platform_states",
         sa.Column("platform", sa.String(length=50), nullable=False),
-        sa.Column("session_state", sa.String(length=30), nullable=False, server_default="idle"),
+        sa.Column(
+            "session_state", sa.String(length=30), nullable=False, server_default="idle"
+        ),
         sa.Column("current_job_id", sa.String(length=36), nullable=True),
         sa.Column("last_job_id", sa.String(length=36), nullable=True),
         sa.Column("last_error_code", sa.String(length=100), nullable=True),
@@ -87,7 +103,6 @@ def upgrade() -> None:
     )
 
     # Seed initial platform states
-    now_utc = sa.text("CURRENT_TIMESTAMP")
     op.execute(
         sa.text(
             "INSERT INTO platform_states (platform, session_state, is_paused, updated_at) "

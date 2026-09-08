@@ -10,7 +10,9 @@ from publisher.main import create_app
 
 
 @pytest.mark.asyncio
-async def test_api_unauthorized_without_token(test_settings: PublisherSettings, test_db: object) -> None:
+async def test_api_unauthorized_without_token(
+    test_settings: PublisherSettings, test_db: object
+) -> None:
     engine, session_factory = test_db
     app = create_app(test_settings)
     app.state.engine = engine
@@ -23,7 +25,9 @@ async def test_api_unauthorized_without_token(test_settings: PublisherSettings, 
 
 
 @pytest.mark.asyncio
-async def test_console_login_flow(test_settings: PublisherSettings, test_db: object) -> None:
+async def test_console_login_flow(
+    test_settings: PublisherSettings, test_db: object
+) -> None:
     engine, session_factory = test_db
     app = create_app(test_settings)
     app.state.engine = engine
@@ -55,3 +59,25 @@ async def test_console_login_flow(test_settings: PublisherSettings, test_db: obj
         resp4 = await ac.get("/", cookies=resp3.cookies)
         assert resp4.status_code == 200
         assert "Browser Publisher" in resp4.text
+
+        # 5. Calling /v1 endpoints with cookie succeeds (not 401)
+        resp5 = await ac.get("/v1/jobs", cookies=resp3.cookies)
+        assert resp5.status_code == 200
+
+        resp6 = await ac.get("/v1/platforms", cookies=resp3.cookies)
+        assert resp6.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_qr_png_unauthorized_without_auth(
+    test_settings: PublisherSettings, test_db: object
+) -> None:
+    engine, session_factory = test_db
+    app = create_app(test_settings)
+    app.state.engine = engine
+    app.state.session_factory = session_factory
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/v1/platforms/wechat_mp/qr.png")
+        assert resp.status_code == 401

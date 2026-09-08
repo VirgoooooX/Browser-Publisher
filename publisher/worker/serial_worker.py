@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import httpx
 import structlog
@@ -19,7 +17,7 @@ from publisher.config import PublisherSettings
 from publisher.models import MediaAsset, PlatformState, PublishJob
 from publisher.notify_alert import emit_notify_hub_alert
 from publisher.platforms.base import BasePlatformPublisher
-from publisher.worker.clean_artifacts import clean_expired_media, clean_screenshots
+from publisher.worker.clean_artifacts import clean_screenshots
 
 logger = structlog.get_logger()
 
@@ -114,26 +112,30 @@ class SerialWorker:
                     phase=job.publish_phase,
                     attempts=job.attempt_count,
                 )
-                if job.publish_phase in ("publish_clicked", "reconciling"):
+                if job.publish_phase in (
+                    "publish_intent",
+                    "publish_clicked",
+                    "reconciling",
+                ):
                     # NEVER click publish again. Switch to reconciling only
                     job.publish_phase = "reconciling"
                     job.status = "queued"
                 elif job.publish_phase == "draft_saved":
                     job.status = "queued"
-                elif job.publish_phase in ("editing", "publish_intent", None):
+                elif job.publish_phase in ("editing", None):
                     if job.attempt_count < job.max_attempts:
                         job.status = "queued"
                         job.publish_phase = None
                     else:
                         job.status = "failed"
                         job.error_code = "MAX_ATTEMPTS_EXCEEDED"
-                        job.error_summary = "Worker crashed during editing and max attempts reached"
+                        job.error_summary = (
+                            "Worker crashed during editing and max attempts reached"
+                        )
                         job.finished_at = datetime.now(UTC)
 
             # Clear current_job_id on platforms
-            await session.execute(
-                update(PlatformState).values(current_job_id=None)
-            )
+            await session.execute(update(PlatformState).values(current_job_id=None))
             await session.commit()
 
     async def _main_loop(self) -> None:
@@ -173,9 +175,21 @@ class SerialWorker:
                     # Platform is paused due to risk control; skip
                     continue
 
-                if job.platform == "xiaohongshu" and p_state and p_state.last_publish_at:
+                if (
+                    job.platform == "xiaohongshu"
+                    and p_state
+                    and p_state.last_publish_at
+                ):
                     cooldown = timedelta(seconds=self.settings.xhs_min_interval_seconds)
-                    if now - p_state.last_publish_at.replace(tzinfo=UTC if p_state.last_publish_at.tzinfo is None else p_state.last_publish_at.tzinfo) < cooldown:
+                    if (
+                        now
+                        - p_state.last_publish_at.replace(
+                            tzinfo=UTC
+                            if p_state.last_publish_at.tzinfo is None
+                            else p_state.last_publish_at.tzinfo
+                        )
+                        < cooldown
+                    ):
                         # Xiaohongshu 1800s cooldown active; skip
                         continue
 
@@ -193,7 +207,9 @@ class SerialWorker:
             if publisher is None:
                 target_job.status = "failed"
                 target_job.error_code = "PLATFORM_NOT_SUPPORTED"
-                target_job.error_summary = f"No publisher adapter registered for {platform_name}"
+                target_job.error_summary = (
+                    f"No publisher adapter registered for {platform_name}"
+                )
                 target_job.finished_at = datetime.now(UTC)
                 await session.commit()
                 return True
@@ -296,6 +312,7 @@ class SerialWorker:
 
             start_time = job.started_at or datetime.now(UTC)
 
+            temp_media_files: list[Path] = []
             try:
                 # 1. Resolve media paths
                 media_paths: list[Path] = []
@@ -310,6 +327,7 @@ class SerialWorker:
                         dl_path = await self._download_temp_media(str(item["url"]))
                         if dl_path:
                             media_paths.append(dl_path)
+                            temp_media_files.append(dl_path)
 
                 # 2. Check if we are resuming from reconciling
                 if job.publish_phase == "reconciling":
@@ -319,13 +337,17 @@ class SerialWorker:
                         job.status = "published"
                         job.final_url = published_url
                         job.finished_at = datetime.now(UTC)
-                        await self._record_platform_success(session, platform_name, job.id)
+                        await self._record_platform_success(
+                            session, platform_name, job.id
+                        )
                     else:
                         job.status = "publish_unknown"
                         job.error_code = "PUBLISH_RESULT_UNKNOWN"
                         job.error_summary = "Reconciliation could not locate published article in management list"
                         job.finished_at = datetime.now(UTC)
-                        await self._record_platform_finish(session, platform_name, job.id)
+                        await self._record_platform_finish(
+                            session, platform_name, job.id
+                        )
                         await emit_notify_hub_alert(
                             self.settings,
                             event_type="publisher.job.publish_unknown",
@@ -342,18 +364,27 @@ class SerialWorker:
                     return
 
                 # 3. Check if resuming from draft_saved
-                if job.publish_phase == "draft_saved" and job.platform_draft_id:
+                if job.publish_phase == "draft_saved":
                     if job.mode == "draft":
                         job.status = "draft_saved"
                         job.finished_at = datetime.now(UTC)
-                        await self._record_platform_finish(session, platform_name, job.id)
+                        await self._record_platform_finish(
+                            session, platform_name, job.id
+                        )
                         await session.commit()
                         return
 
                     # mode is publish: open draft and proceed to publish
-                    logger.info("resuming_from_saved_draft", job_id=job.id, draft_id=job.platform_draft_id)
-                    if job.final_url:
-                        await publisher.open_draft(job.final_url)
+                    logger.info(
+                        "resuming_from_saved_draft",
+                        job_id=job.id,
+                        draft_id=job.platform_draft_id,
+                    )
+                    if not job.final_url:
+                        raise RuntimeError(
+                            "DRAFT_OPEN_FAILED: Saved draft URL is unavailable"
+                        )
+                    await publisher.open_draft(job.final_url)
                     job.publish_phase = "publish_intent"
                     await session.commit()
 
@@ -366,13 +397,19 @@ class SerialWorker:
                         job.status = "published"
                         job.final_url = published_url
                         job.finished_at = datetime.now(UTC)
-                        await self._record_platform_success(session, platform_name, job.id)
+                        await self._record_platform_success(
+                            session, platform_name, job.id
+                        )
                     else:
                         job.status = "publish_unknown"
                         job.error_code = "PUBLISH_RESULT_UNKNOWN"
-                        job.error_summary = "Publish confirmed but published URL could not be retrieved"
+                        job.error_summary = (
+                            "Publish confirmed but published URL could not be retrieved"
+                        )
                         job.finished_at = datetime.now(UTC)
-                        await self._record_platform_finish(session, platform_name, job.id)
+                        await self._record_platform_finish(
+                            session, platform_name, job.id
+                        )
                     await session.commit()
                     return
 
@@ -394,6 +431,9 @@ class SerialWorker:
                     return
 
                 # mode == "publish"
+                if job.final_url and job.platform != "xiaohongshu":
+                    await publisher.open_draft(job.final_url)
+
                 job.publish_phase = "publish_intent"
                 await session.commit()
 
@@ -429,6 +469,17 @@ class SerialWorker:
 
             except Exception as exc:
                 await self._handle_job_failure(session, job, platform_name, exc)
+            finally:
+                for temp_file in temp_media_files:
+                    try:
+                        if temp_file.exists():
+                            temp_file.unlink()
+                    except Exception as e:
+                        logger.debug(
+                            "cleanup_temp_media_failed",
+                            path=str(temp_file),
+                            error=str(e),
+                        )
 
     async def _handle_job_failure(
         self,
@@ -485,7 +536,11 @@ class SerialWorker:
                     f"后续任务已暂停执行。请在控制台人工处理并点击【恢复发布】：{self.settings.console_public_url}"
                 ),
                 level="critical",
-                payload={"platform": platform_name, "job_id": job.id, "error_code": err_code},
+                payload={
+                    "platform": platform_name,
+                    "job_id": job.id,
+                    "error_code": err_code,
+                },
             )
             return
 
@@ -514,15 +569,41 @@ class SerialWorker:
             "PUBLISH_CONFIRM_FAILED",
             "PROVIDER_UI_CHANGED",
         }
-        # Once publish_clicked or reconciling, NEVER retry from scratch
-        if job.publish_phase in ("publish_clicked", "reconciling"):
+        # Once publish_intent or publish_clicked, switch to reconciling instead of aborting without check
+        if job.publish_phase in ("publish_intent", "publish_clicked"):
+            job.publish_phase = "reconciling"
+            job.status = "queued"
+            logger.warning(
+                "job_failed_during_publish_switched_to_reconcile",
+                job_id=job.id,
+                phase=job.publish_phase,
+                error=err_msg,
+            )
+        elif job.publish_phase == "reconciling":
             job.status = "publish_unknown"
+            job.error_code = "PUBLISH_RESULT_UNKNOWN"
+            job.error_summary = f"Reconciliation failed after exception: {err_msg}"
             job.finished_at = datetime.now(UTC)
+            await emit_notify_hub_alert(
+                self.settings,
+                event_type="publisher.job.publish_unknown",
+                event_key=f"job-unknown-{job.id}",
+                title=f"【{platform_name}】发布结果未知 (publish_unknown)",
+                content=(
+                    f"任务 {job.id} 标题《{job.content.get('title')}》在作品核对期间失败。\n"
+                    f"错误信息：{err_msg}\n控制台：{self.settings.console_public_url}"
+                ),
+                level="critical",
+                payload={"job_id": job.id, "platform": platform_name},
+            )
         elif err_code not in non_retryable and job.attempt_count < job.max_attempts:
             # Retryable network/timeout error before publish_clicked
             job.status = "queued"
-            job.publish_phase = None
-            logger.info("job_scheduled_for_retry", job_id=job.id, attempt=job.attempt_count)
+            if job.publish_phase != "draft_saved":
+                job.publish_phase = None
+            logger.info(
+                "job_scheduled_for_retry", job_id=job.id, attempt=job.attempt_count
+            )
         else:
             job.status = "failed"
             job.finished_at = datetime.now(UTC)
@@ -590,7 +671,9 @@ class SerialWorker:
                         ext = ".png"
                     elif "webp" in ct:
                         ext = ".webp"
-                    temp_file = self.settings.media_dir / f"temp_{uuid.uuid4().hex[:12]}{ext}"
+                    temp_file = (
+                        self.settings.media_dir / f"temp_{uuid.uuid4().hex[:12]}{ext}"
+                    )
                     temp_file.write_bytes(resp.content)
                     return temp_file
         except Exception as exc:

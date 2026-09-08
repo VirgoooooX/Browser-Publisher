@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,7 +21,11 @@ def clean_screenshots(artifacts_dir: Path, max_saved: int = MAX_SCREENSHOTS) -> 
         if not artifacts_dir.exists():
             return
         png_files = sorted(
-            [p for p in artifacts_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png"],
+            [
+                p
+                for p in artifacts_dir.iterdir()
+                if p.is_file() and p.suffix.lower() == ".png"
+            ],
             key=lambda p: p.stat().st_mtime,
         )
         if len(png_files) > max_saved:
@@ -31,7 +34,9 @@ def clean_screenshots(artifacts_dir: Path, max_saved: int = MAX_SCREENSHOTS) -> 
                 try:
                     f.unlink()
                 except OSError as exc:
-                    logger.debug("delete_old_screenshot_failed", path=str(f), error=str(exc))
+                    logger.debug(
+                        "delete_old_screenshot_failed", path=str(f), error=str(exc)
+                    )
     except Exception as exc:
         logger.debug("clean_screenshots_failed", error=str(exc))
 
@@ -47,7 +52,11 @@ async def clean_expired_media(
         # Find terminal jobs finished before cutoff
         stmt = (
             select(PublishJob)
-            .where(PublishJob.status.in_(["published", "failed", "cancelled", "draft_saved"]))
+            .where(
+                PublishJob.status.in_(
+                    ["published", "failed", "cancelled", "draft_saved"]
+                )
+            )
             .where(PublishJob.finished_at < cutoff)
         )
         res = await session.execute(stmt)
@@ -77,7 +86,9 @@ async def clean_expired_media(
 
         deletable_ids = media_ids_to_check - active_media_ids
         for m_id in deletable_ids:
-            m_res = await session.execute(select(MediaAsset).where(MediaAsset.id == m_id))
+            m_res = await session.execute(
+                select(MediaAsset).where(MediaAsset.id == m_id)
+            )
             asset = m_res.scalar_one_or_none()
             if asset:
                 p = Path(asset.file_path)

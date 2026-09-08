@@ -48,7 +48,11 @@ async def emit_notify_hub_alert(
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},
             )
             if resp.status_code in (200, 202):
-                logger.info("notify_hub_alert_emitted", event_type=event_type, event_key=event_key)
+                logger.info(
+                    "notify_hub_alert_emitted",
+                    event_type=event_type,
+                    event_key=event_key,
+                )
                 return True
             else:
                 logger.warning(

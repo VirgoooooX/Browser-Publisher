@@ -97,7 +97,10 @@ def cmd_publish(args: argparse.Namespace, client: httpx.Client) -> None:
         elif isinstance(item, dict):
             processed_media.append(item)
 
-    client_req_id = data.get("client_request_id") or f"cli-{file_path.stem}-{int(Path(args.file).stat().st_mtime)}"
+    client_req_id = (
+        data.get("client_request_id")
+        or f"cli-{file_path.stem}-{int(Path(args.file).stat().st_mtime)}"
+    )
     payload: dict[str, Any] = {
         "client_request_id": client_req_id,
         "platform": platform,
@@ -108,14 +111,18 @@ def cmd_publish(args: argparse.Namespace, client: httpx.Client) -> None:
         "topics": data.get("topics", []),
     }
 
-    print(f"[*] Submitting publish job to {platform} (mode: {payload['mode'] or 'default'})...")
+    print(
+        f"[*] Submitting publish job to {platform} (mode: {payload['mode'] or 'default'})..."
+    )
     resp = client.post("/v1/jobs", json=payload)
     if resp.status_code not in (200, 202):
         print(f"[!] Submit error ({resp.status_code}): {resp.text}")
         sys.exit(1)
 
     res_data = resp.json()
-    print(f"[+] Job accepted! ID: {res_data['id']}, Status: {res_data['status']}, Effective Mode: {res_data['effective_mode']}")
+    print(
+        f"[+] Job accepted! ID: {res_data['id']}, Status: {res_data['status']}, Effective Mode: {res_data['effective_mode']}"
+    )
 
 
 def cmd_status(args: argparse.Namespace, client: httpx.Client) -> None:
@@ -164,7 +171,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--token",
-        default=os.getenv("PUBLISHER_ACCESS_TOKEN", "dev-local-insecure-token-1234567890"),
+        default=os.getenv(
+            "PUBLISHER_ACCESS_TOKEN", "dev-local-insecure-token-1234567890"
+        ),
         help="Publisher access token",
     )
 
@@ -176,17 +185,23 @@ def main() -> None:
     p_login.add_argument("--save-qr", help="Path to save QR image to")
 
     # publish
-    p_pub = subparsers.add_parser("publish", help="Submit article/note JSON for publishing")
+    p_pub = subparsers.add_parser(
+        "publish", help="Submit article/note JSON for publishing"
+    )
     p_pub.add_argument("platform", help="wechat or xhs")
     p_pub.add_argument("file", help="Path to article JSON file")
-    p_pub.add_argument("--mode", choices=["draft", "publish"], help="Override publish mode")
+    p_pub.add_argument(
+        "--mode", choices=["draft", "publish"], help="Override publish mode"
+    )
 
     # status
     p_stat = subparsers.add_parser("status", help="Get publish job status")
     p_stat.add_argument("job_id", help="Job ID (e.g. job_xxx)")
 
     # resume
-    p_res = subparsers.add_parser("resume", help="Resume platform paused due to risk control")
+    p_res = subparsers.add_parser(
+        "resume", help="Resume platform paused due to risk control"
+    )
     p_res.add_argument("platform", help="wechat or xhs")
 
     args = parser.parse_args()

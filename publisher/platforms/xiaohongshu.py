@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import structlog
 
@@ -38,7 +37,9 @@ QR_SELECTORS = [
 class XiaohongshuPublisher(BasePlatformPublisher):
     """Automates image-text draft creation, publication, and risk detection on Xiaohongshu."""
 
-    def __init__(self, settings: PublisherSettings, browser_manager: Any = None) -> None:
+    def __init__(
+        self, settings: PublisherSettings, browser_manager: Any = None
+    ) -> None:
         super().__init__(settings)
         self._browser_manager = browser_manager
         self._playwright: Any = None
@@ -63,7 +64,6 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
             ],
         )
 
@@ -143,14 +143,18 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                     png_bytes = await loc.first.screenshot(type="png")
                     return base64.b64encode(png_bytes).decode("ascii")
                 except Exception as exc:
-                    logger.debug("xhs_qr_screenshot_failed", selector=selector, error=str(exc))
+                    logger.debug(
+                        "xhs_qr_screenshot_failed", selector=selector, error=str(exc)
+                    )
         return None
 
     async def clear_auth(self) -> None:
-        """Clear cookies and force navigation away from authenticated state."""
+        """Clear cookies for Xiaohongshu domain only and force navigation away from authenticated state."""
         context = await self._get_context()
         if context:
-            await context.clear_cookies()
+            for domain in ["creator.xiaohongshu.com", ".xiaohongshu.com"]:
+                with contextlib.suppress(Exception):
+                    await context.clear_cookies(domain=domain)
         page = await self.get_page()
         with contextlib.suppress(Exception):
             await page.goto(
@@ -236,13 +240,19 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         if not media_paths:
             raise RuntimeError("CONTENT_REJECTED: Xiaohongshu requires 1-18 images")
 
-        file_input = page.locator('input[type="file"][accept*="image"], input.upload-input').first
+        file_input = page.locator(
+            'input[type="file"][accept*="image"], input.upload-input'
+        ).first
         if await file_input.count() == 0:
-            raise RuntimeError("EDITOR_NOT_FOUND: Xiaohongshu file upload input not found")
+            raise RuntimeError(
+                "EDITOR_NOT_FOUND: Xiaohongshu file upload input not found"
+            )
 
         file_str_list = [str(p.resolve()) for p in media_paths if p.is_file()]
         if not file_str_list:
-            raise RuntimeError("CONTENT_REJECTED: No valid local image files found for upload")
+            raise RuntimeError(
+                "CONTENT_REJECTED: No valid local image files found for upload"
+            )
 
         await file_input.set_input_files(file_str_list)
         logger.info("xhs_images_uploaded", count=len(file_str_list))
@@ -312,9 +322,13 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         await self.check_risk_control(page)
 
         # 6. Click '存草稿' (Save Draft)
-        draft_btn = page.locator('button:has-text("存草稿"), button:has-text("暂存"), .save-draft-btn').first
+        draft_btn = page.locator(
+            'button:has-text("存草稿"), button:has-text("暂存"), .save-draft-btn'
+        ).first
         if await draft_btn.count() == 0 or not await draft_btn.first.is_visible():
-            raise RuntimeError("EDITOR_NOT_FOUND: Xiaohongshu '存草稿' button not found")
+            raise RuntimeError(
+                "EDITOR_NOT_FOUND: Xiaohongshu '存草稿' button not found"
+            )
 
         await draft_btn.click()
         logger.info("xhs_draft_button_clicked", job_id=job.id)
@@ -332,6 +346,11 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             if save_confirmed:
                 break
             await asyncio.sleep(0.5)
+
+        if not save_confirmed:
+            raise RuntimeError(
+                "DRAFT_SAVE_FAILED: Xiaohongshu draft save confirmation not detected within timeout"
+            )
 
         # In XHS creator web UI, saved draft stays on publish URL or redirects to manage
         draft_url = page.url
@@ -356,7 +375,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             'button.publishBtn, button:has-text("发布"):not(:has-text("草稿")), .publish-btn'
         ).first
         if await publish_btn.count() == 0 or not await publish_btn.first.is_visible():
-            raise RuntimeError("PUBLISH_CONFIRM_FAILED: Xiaohongshu '发布' button not found")
+            raise RuntimeError(
+                "PUBLISH_CONFIRM_FAILED: Xiaohongshu '发布' button not found"
+            )
 
         await publish_btn.click()
         logger.info("xhs_publish_button_clicked", job_id=job.id)
@@ -364,11 +385,15 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         await self.check_risk_control(page)
 
         # Check for optional confirmation modal
-        confirm_btn = page.locator('.c-modal button:has-text("确认"), [role="dialog"] button:has-text("确认")').first
+        confirm_btn = page.locator(
+            '.c-modal button:has-text("确认"), [role="dialog"] button:has-text("确认")'
+        ).first
         if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
             await confirm_btn.click()
 
-    async def verify_published(self, job: PublishJob, start_time: datetime) -> str | None:
+    async def verify_published(
+        self, job: PublishJob, start_time: datetime
+    ) -> str | None:
         """Verify note was published by inspecting the management list."""
         return await self.reconcile(job, start_time, max_seconds=30)
 
@@ -404,7 +429,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                     f'div:has-text("{title}")'
                 )
                 if await item.count() > 0:
-                    link = item.first.locator('a[href*="xiaohongshu.com"], a[href*="/explore/"]')
+                    link = item.first.locator(
+                        'a[href*="xiaohongshu.com"], a[href*="/explore/"]'
+                    )
                     if await link.count() > 0:
                         href = await link.first.get_attribute("href")
                         if href:
