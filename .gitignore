@@ -28,16 +28,23 @@ ENV/
 
 # Testing & Coverage
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
 htmlcov/
 
-# IDE
+# IDE & OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
 
 # Data & Runtime artifacts
 data/
 browser-data/
+scratch/
+.tmp/
 *.log
 *.sqlite
 *.db
