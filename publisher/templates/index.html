@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser Publisher 控制台</title>
+  <link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+  <header>
+    <div class="logo-area">
+      <span class="logo-title">Browser Publisher</span>
+      <span class="logo-badge">v0.1.0</span>
+    </div>
+    <div class="user-area">
+      <form action="/console/logout" method="POST" style="margin: 0;">
+        <button type="submit" class="btn btn-secondary btn-sm">退出登录</button>
+      </form>
+    </div>
+  </header>
+
+  <main>
+    <!-- Platform Sessions Section -->
+    <section>
+      <div class="grid-cards">
+        {% for p in platforms %}
+        <div class="card" id="card-{{ p.platform }}">
+          <div class="card-header">
+            <div class="card-title">
+              {% if p.platform == "wechat_mp" %}微信公众号{% else %}小红书{% endif %}
+            </div>
+            {% if p.is_paused %}
+            <span class="status-badge status-paused">风控暂停 (PAUSED)</span>
+            {% else %}
+            <span class="status-badge status-{{ p.session_state }}">{{ p.session_state }}</span>
+            {% endif %}
+          </div>
+
+          <div class="info-row">
+            <span class="info-label">会话状态</span>
+            <span class="info-val">{{ p.session_state }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">当前运行任务</span>
+            <span class="info-val">{{ p.current_job_id or '无' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">最近发布时间</span>
+            <span class="info-val">{{ p.last_publish_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_publish_at else '无' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">最近认证时间</span>
+            <span class="info-val">{{ p.last_auth_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_auth_at else '无' }}</span>
+          </div>
+
+          {% if p.is_paused and p.paused_reason %}
+          <div class="info-row" style="color: #f472b6;">
+            <span class="info-label" style="color: #f472b6;">暂停原因</span>
+            <span class="info-val">{{ p.paused_reason }}</span>
+          </div>
+          {% endif %}
+
+          <div class="card-actions">
+            {% if p.session_state == 'auth_required' or p.has_qr_code %}
+            <button class="btn btn-warning btn-sm" onclick="showQrModal('{{ p.platform }}')">扫码登录</button>
+            {% else %}
+            <button class="btn btn-secondary btn-sm" onclick="triggerLogin('{{ p.platform }}')">刷新登录</button>
+            {% endif %}
+
+            {% if p.is_paused %}
+            <button class="btn btn-danger btn-sm" onclick="resumePlatform('{{ p.platform }}')">解除暂停 (Resume)</button>
+            {% endif %}
+
+            <button class="btn btn-secondary btn-sm" onclick="reauthPlatform('{{ p.platform }}')">清除凭证重新登录</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- Manual Publish Section -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">手动提交发布任务</h2>
+      </div>
+      <form id="publishForm" onsubmit="submitManualJob(event)">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+          <div class="form-group">
+            <label for="formPlatform">目标平台</label>
+            <select id="formPlatform" name="platform" onchange="onPlatformChange()">
+              <option value="wechat_mp">微信公众号 (wechat_mp)</option>
+              <option value="xiaohongshu">小红书 (xiaohongshu)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="formMode">发布模式</label>
+            <select id="formMode" name="mode">
+              <option value="draft">存草稿 (draft)</option>
+              <option value="publish" selected>直接发表 (publish)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="formAuthor">作者</label>
+            <input type="text" id="formAuthor" name="author" value="Publisher Console">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="formTitle">标题</label>
+          <input type="text" id="formTitle" name="title" required placeholder="文章或笔记标题">
+        </div>
+
+        <div class="form-group">
+          <label for="formDigest">摘要 (可选)</label>
+          <input type="text" id="formDigest" name="digest" placeholder="文章摘要">
+        </div>
+
+        <div class="form-group">
+          <label for="formBodyText">正文文本 (纯文本，小红书必填)</label>
+          <textarea id="formBodyText" name="body_text" rows="4" placeholder="正文内容"></textarea>
+        </div>
+
+        <div class="form-group" id="bodyHtmlGroup">
+          <label for="formBodyHtml">正文 HTML (可选，仅微信公众号支持)</label>
+          <textarea id="formBodyHtml" name="body_html" rows="4" placeholder="<p>富文本内容</p>"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="formMediaUrl">图片 URL (多张请用逗号或换行分隔)</label>
+          <textarea id="formMediaUrl" name="media_urls" rows="2" placeholder="https://example.com/cover.jpg"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="formFile">本地图片上传</label>
+          <input type="file" id="formFile" accept="image/jpeg,image/png,image/webp" multiple>
+        </div>
+
+        <button type="submit" class="btn btn-primary" style="margin-top: 1rem;">入队发布任务</button>
+      </form>
+    </section>
+
+    <!-- Recent Jobs Table Section -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">最近发布任务</h2>
+        <button class="btn btn-secondary btn-sm" onclick="reloadJobs()">刷新列表</button>
+      </div>
+
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>平台</th>
+              <th>模式</th>
+              <th>状态</th>
+              <th>阶段</th>
+              <th>标题</th>
+              <th>结果 / 链接</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="jobsTableBody">
+            {% for job in jobs %}
+            <tr>
+              <td class="info-val">{{ job.id }}</td>
+              <td>{{ job.platform }}</td>
+              <td>{{ job.mode }}</td>
+              <td><span class="status-badge status-{{ job.status }}">{{ job.status }}</span></td>
+              <td>{{ job.publish_phase or '-' }}</td>
+              <td>{{ job.content.get('title', '') }}</td>
+              <td>
+                {% if job.final_url %}
+                <a href="{{ job.final_url }}" target="_blank" style="color: var(--accent-primary);">打开链接</a>
+                {% elif job.error_code %}
+                <span style="color: var(--danger);" title="{{ job.error_summary }}">{{ job.error_code }}</span>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+              <td>{{ job.created_at.strftime('%m-%d %H:%M:%S') }}</td>
+              <td>
+                {% if job.status in ('queued', 'waiting_auth') %}
+                <button class="btn btn-danger btn-sm" onclick="cancelJob('{{ job.id }}')">取消</button>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- QR Code Modal -->
+  <div id="qrModal" class="qr-modal">
+    <div class="qr-content">
+      <h3 id="qrTitle">扫码登录</h3>
+      <img id="qrImage" class="qr-img" src="" alt="二维码">
+      <p style="font-size: 0.875rem; color: var(--text-secondary);">请打开对应客户端扫码确认登录</p>
+      <div style="display: flex; gap: 0.5rem; justify-content: center;">
+        <button class="btn btn-secondary" onclick="closeQrModal()">关闭</button>
+        <button class="btn btn-primary" onclick="refreshQr()">刷新二维码</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let activeQrPlatform = null;
+    let qrPollInterval = null;
+
+    function onPlatformChange() {
+      const p = document.getElementById('formPlatform').value;
+      const htmlGroup = document.getElementById('bodyHtmlGroup');
+      if (p === 'xiaohongshu') {
+        htmlGroup.style.display = 'none';
+      } else {
+        htmlGroup.style.display = 'flex';
+      }
+    }
+
+    function showQrModal(platform) {
+      activeQrPlatform = platform;
+      document.getElementById('qrTitle').innerText = (platform === 'wechat_mp' ? '微信公众号' : '小红书') + ' 扫码登录';
+      document.getElementById('qrImage').src = `/v1/platforms/${platform}/qr.png?t=` + Date.now();
+      document.getElementById('qrModal').classList.add('active');
+
+      if (qrPollInterval) clearInterval(qrPollInterval);
+      qrPollInterval = setInterval(pollSessionStatus, 3000);
+    }
+
+    function closeQrModal() {
+      document.getElementById('qrModal').classList.remove('active');
+      if (qrPollInterval) clearInterval(qrPollInterval);
+      activeQrPlatform = null;
+    }
+
+    function refreshQr() {
+      if (!activeQrPlatform) return;
+      fetch(`/v1/platforms/${activeQrPlatform}/login`, { method: 'POST' })
+        .then(() => {
+          document.getElementById('qrImage').src = `/v1/platforms/${activeQrPlatform}/qr.png?t=` + Date.now();
+        });
+    }
+
+    async function pollSessionStatus() {
+      if (!activeQrPlatform) return;
+      try {
+        const res = await fetch('/v1/platforms');
+        const data = await res.json();
+        const p = data.platforms.find(x => x.platform === activeQrPlatform);
+        if (p && p.session_state === 'ready') {
+          closeQrModal();
+          location.reload();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function triggerLogin(platform) {
+      await fetch(`/v1/platforms/${platform}/login`, { method: 'POST' });
+      showQrModal(platform);
+    }
+
+    async function reauthPlatform(platform) {
+      if (!confirm(`确定清除【${platform}】凭证并重新登录吗？`)) return;
+      await fetch(`/v1/platforms/${platform}/reauth`, { method: 'POST' });
+      showQrModal(platform);
+    }
+
+    async function resumePlatform(platform) {
+      await fetch(`/v1/platforms/${platform}/resume`, { method: 'POST' });
+      location.reload();
+    }
+
+    async function cancelJob(jobId) {
+      if (!confirm(`确定取消任务 ${jobId} 吗？`)) return;
+      await fetch(`/v1/jobs/${jobId}/cancel`, { method: 'POST' });
+      reloadJobs();
+    }
+
+    async function submitManualJob(e) {
+      e.preventDefault();
+      const platform = document.getElementById('formPlatform').value;
+      const mode = document.getElementById('formMode').value;
+      const title = document.getElementById('formTitle').value.trim();
+      const author = document.getElementById('formAuthor').value.trim();
+      const digest = document.getElementById('formDigest').value.trim();
+      const body_text = document.getElementById('formBodyText').value.trim();
+      const body_html = document.getElementById('formBodyHtml').value.trim();
+      const mediaUrlsRaw = document.getElementById('formMediaUrl').value.trim();
+      const fileInput = document.getElementById('formFile');
+
+      const media = [];
+      if (mediaUrlsRaw) {
+        mediaUrlsRaw.split(/[\n,]+/).forEach(u => {
+          if (u.trim()) media.push({ kind: 'url', url: u.trim() });
+        });
+      }
+
+      // Upload local files if selected
+      if (fileInput.files.length > 0) {
+        for (let i = 0; i < fileInput.files.length; i++) {
+          const fd = new FormData();
+          fd.append('file', fileInput.files[i]);
+          const upRes = await fetch('/v1/media', { method: 'POST', body: fd });
+          if (!upRes.ok) {
+            alert('文件上传失败：' + (await upRes.text()));
+            return;
+          }
+          const upData = await upRes.json();
+          media.push({ kind: 'uploaded', media_id: upData.media_id });
+        }
+      }
+
+      const client_request_id = 'console-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+      const payload = {
+        client_request_id,
+        platform,
+        mode,
+        content: { title, author, digest, body_text, body_html: body_html || undefined },
+        media,
+        topics: []
+      };
+
+      const res = await fetch('/v1/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.status === 202 || res.status === 200) {
+        alert('发布任务已成功提交入队！');
+        document.getElementById('publishForm').reset();
+        reloadJobs();
+      } else {
+        const err = await res.json();
+        alert('提交失败：' + (err.detail || JSON.stringify(err)));
+      }
+    }
+
+    async function reloadJobs() {
+      const res = await fetch('/v1/jobs?page=1&page_size=20');
+      if (!res.ok) return;
+      const data = await res.json();
+      const tbody = document.getElementById('jobsTableBody');
+      tbody.innerHTML = '';
+      data.items.forEach(job => {
+        const tr = document.createElement('tr');
+        const linkOrErr = job.final_url
+          ? `<a href="${job.final_url}" target="_blank" style="color: var(--accent-primary);">打开链接</a>`
+          : (job.error_code ? `<span style="color: var(--danger);">${job.error_code}</span>` : '-');
+        const cancelBtn = (job.status === 'queued' || job.status === 'waiting_auth')
+          ? `<button class="btn btn-danger btn-sm" onclick="cancelJob('${job.id}')">取消</button>`
+          : '-';
+        tr.innerHTML = `
+          <td class="info-val">${job.id}</td>
+          <td>${job.platform}</td>
+          <td>${job.mode}</td>
+          <td><span class="status-badge status-${job.status}">${job.status}</span></td>
+          <td>${job.publish_phase || '-'}</td>
+          <td>${job.content?.title || ''}</td>
+          <td>${linkOrErr}</td>
+          <td>${job.created_at.substring(5, 19).replace('T', ' ')}</td>
+          <td>${cancelBtn}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Auto reload jobs every 10s
+    setInterval(reloadJobs, 10000);
+  </script>
+</body>
+</html>

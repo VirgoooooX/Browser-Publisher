@@ -1,0 +1,25 @@
+services:
+  browser-publisher:
+    build: .
+    image: ghcr.io/virgooooox/browser-publisher:0.1.0
+    container_name: browser-publisher
+    restart: unless-stopped
+    environment:
+      PUBLISHER_ACCESS_TOKEN: "${PUBLISHER_ACCESS_TOKEN:?set access token}"
+      PUBLISHER_DATA_DIR: /app/data
+      PUBLISHER_HEADLESS: "true"
+      PUBLISHER_WECHAT_MP_DEFAULT_MODE: "publish"
+      PUBLISHER_XHS_DEFAULT_MODE: "draft"
+      PUBLISHER_XHS_MIN_INTERVAL_SECONDS: "1800"
+      PUBLISHER_CONSOLE_PUBLIC_URL: "${PUBLISHER_CONSOLE_PUBLIC_URL:-http://192.168.31.100:8790}"
+      PUBLISHER_NOTIFY_EVENT_URL: "${PUBLISHER_NOTIFY_EVENT_URL:-}"
+      PUBLISHER_NOTIFY_API_KEY: "${PUBLISHER_NOTIFY_API_KEY:-}"
+      PUBLISHER_NOTIFY_RECIPIENT_IDS: "${PUBLISHER_NOTIFY_RECIPIENT_IDS:-}"
+    ports:
+      - "8790:8790"
+    volumes:
+      - ./data:/app/data
+    shm_size: "1gb"
+    init: true
+    security_opt:
+      - no-new-privileges:true

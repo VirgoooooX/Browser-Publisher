@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Publisher Console - 登录</title>
+  <link rel="stylesheet" href="/static/console.css">
+  <style>
+    .login-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 80vh;
+    }
+    .login-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: var(--shadow);
+    }
+    .login-header {
+      margin-bottom: 2rem;
+      text-align: center;
+    }
+    .login-header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .login-header p {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
+    }
+    .error-msg {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--danger);
+      color: #fca5a5;
+      padding: 0.75rem;
+      border-radius: var(--radius);
+      font-size: 0.875rem;
+      margin-bottom: 1.25rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-header">
+        <h1>Browser Publisher</h1>
+        <p>输入 PUBLISHER_ACCESS_TOKEN 访问控制台</p>
+      </div>
+
+      {% if error %}
+      <div class="error-msg">{{ error }}</div>
+      {% endif %}
+
+      <form action="/console/login" method="POST">
+        <div class="form-group">
+          <label for="token">Access Token</label>
+          <input type="password" id="token" name="token" required placeholder="输入访问密钥" autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">登录控制台</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
