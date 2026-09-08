@@ -26,11 +26,12 @@ XHS_PUBLISH_URL = f"{XHS_ORIGIN}/publish/publish"
 XHS_MANAGE_URL = f"{XHS_ORIGIN}/manage/note"
 
 QR_SELECTORS = [
-    'img[src^="data:image"]',
+    "img.css-1lhmg90",
     ".qrcode-img",
     "img.qrcode",
     ".qrcode-wrapper img",
     'img[src*="qrcode"]',
+    'img[src^="data:image"]',
     "canvas.qrcode",
 ]
 
@@ -39,7 +40,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
     """Automates image-text draft creation, publication, and risk detection on Xiaohongshu."""
 
     def __init__(
-        self, settings: PublisherSettings, browser_manager: Any = None
+        self,
+        settings: PublisherSettings,
+        browser_manager: Any = None,
     ) -> None:
         super().__init__(settings)
         self._browser_manager = browser_manager
@@ -49,8 +52,7 @@ class XiaohongshuPublisher(BasePlatformPublisher):
 
     async def _get_context(self) -> Any:
         if self._browser_manager is not None:
-            self._context = await self._browser_manager.get_context()
-            return self._context
+            return await self._browser_manager.get_context()
         if self._context is None:
             await self.start()
         return self._context
@@ -64,15 +66,15 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
+        user_data = self.settings.data_dir / "profiles" / "xiaohongshu"
+        user_data.mkdir(parents=True, exist_ok=True)
         self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.settings.profile_dir),
+            user_data_dir=str(user_data),
             headless=self.settings.headless,
-            viewport={"width": 1440, "height": 1100},
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
+            viewport={"width": 1440, "height": 900},
             args=[
+                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
-                "--disable-dev-shm-usage",
             ],
         )
 
@@ -165,15 +167,39 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             except Exception:
                 pass
 
+        # If current view is SMS login rather than QR login, click corner switch badge
+        try:
+            qr_title = page.get_by_text("APP扫一扫登录")
+            is_qr_mode = await qr_title.count() > 0 and await qr_title.first.is_visible()
+            if not is_qr_mode:
+                corner = page.locator(".css-jjnw1w img, .css-wemwzq").first
+                if await corner.count() > 0 and await corner.is_visible():
+                    box = await corner.bounding_box()
+                    if box:
+                        await page.mouse.click(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2,
+                        )
+                        await page.wait_for_timeout(1000)
+        except Exception as exc:
+            logger.debug("xhs_switch_qr_mode_failed", error=str(exc))
+
         for selector in QR_SELECTORS:
             try:
-                loc = page.locator(selector).first
-                await loc.wait_for(state="visible", timeout=3000)
-                src = await loc.get_attribute("src")
-                if src and "data:image" in src and "base64," in src:
-                    return src.split("base64,", 1)[1]
-                png_bytes = await loc.screenshot(type="png")
-                return base64.b64encode(png_bytes).decode("ascii")
+                locs = page.locator(selector)
+                count = await locs.count()
+                for i in range(count):
+                    loc = locs.nth(i)
+                    if await loc.is_visible():
+                        box = await loc.bounding_box()
+                        # Real QR code is large (~160x160); skip corner switch button (64x64)
+                        if box and (box["width"] < 100 or box["height"] < 100):
+                            continue
+                        src = await loc.get_attribute("src")
+                        if src and "data:image" in src and "base64," in src:
+                            return src.split("base64,", 1)[1]
+                        png_bytes = await loc.screenshot(type="png")
+                        return base64.b64encode(png_bytes).decode("ascii")
             except Exception as exc:
                 logger.debug(
                     "xhs_qr_screenshot_failed", selector=selector, error=str(exc)
