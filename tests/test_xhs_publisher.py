@@ -191,3 +191,18 @@ async def test_xhs_save_draft_timeout_fails(
         mock_get_page.return_value = mock_page
         with pytest.raises(RuntimeError, match="DRAFT_SAVE_FAILED"):
             await pub.save_draft(job, [img_file])
+
+
+def test_xhs_extract_and_clean_topics() -> None:
+    body = (
+        "第一段正文说明。\n\n"
+        "原推作者：@someone\n"
+        "原推内容：Some text.\n\n"
+        "#OpenAI #Codex #ChatGPT #AI编程"
+    )
+    clean_body, topics = XiaohongshuPublisher.extract_and_clean_topics(
+        body, ["codex", "openai"]
+    )
+    assert clean_body == "第一段正文说明。\n\n原推作者：@someone\n原推内容：Some text."
+    assert topics == ["codex", "openai", "ChatGPT", "AI编程"]
+

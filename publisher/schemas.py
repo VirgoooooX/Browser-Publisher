@@ -55,6 +55,7 @@ class JobContent(BaseModel):
     body_html: str | None = Field(default=None, max_length=500000)
     author: str | None = Field(default=None, max_length=100)
     digest: str | None = Field(default=None, max_length=500)
+    visibility: str | None = Field(default="public", max_length=50)
 
 
 class JobCreateRequest(BaseModel):

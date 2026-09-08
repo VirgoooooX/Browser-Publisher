@@ -662,7 +662,7 @@ class SerialWorker:
 
     async def _download_temp_media(self, url: str) -> Path | None:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     ext = ".jpg"

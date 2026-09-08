@@ -249,5 +249,96 @@ async def test_wechat_disables_enabled_group_notification() -> None:
     page.get_by_text.return_value = label
 
     await WeChatPublisher._disable_group_notification(page)
-
     enabled_switch.click.assert_awaited_once_with(force=True)
+
+
+@pytest.mark.asyncio
+async def test_wechat_handle_admin_verification_flow(
+    test_settings: PublisherSettings, tmp_path: Any
+) -> None:
+    from pathlib import Path
+    from publisher.models import PublishJob
+
+    test_settings.data_dir = Path(tmp_path)
+    publisher = WeChatPublisher(test_settings)
+
+    page = MagicMock()
+    page.frames = []
+    page.is_closed.return_value = False
+
+    dialog_loc = MagicMock()
+    dialog_loc.count = AsyncMock(return_value=1)
+    dialog_loc.first = dialog_loc
+    dialog_loc.is_visible = AsyncMock(side_effect=[True, True, False])
+    dialog_loc.inner_text = AsyncMock(return_value="微信验证\n请使用管理员微信号扫码")
+    dialog_loc.screenshot = AsyncMock()
+
+    page.locator.return_value = dialog_loc
+    page.inner_text = AsyncMock(return_value="已发表成功")
+
+    job = PublishJob(
+        platform="wechat_mp",
+        mode="publish",
+        content={"title": "测试文章标题"},
+    )
+
+    with patch(
+        "publisher.notify_alert.emit_notify_hub_alert", new_callable=AsyncMock
+    ) as mock_alert:
+        mock_alert.return_value = True
+        handled = await publisher._handle_admin_verification(page, job)
+        assert handled is True
+        dialog_loc.screenshot.assert_awaited_once()
+        mock_alert.assert_awaited_once()
+        call_kwargs = mock_alert.call_args.kwargs
+        assert call_kwargs["event_type"] == "publisher.wechat.verify_qr"
+        assert "测试文章标题" in call_kwargs["content"]
+        assert call_kwargs["image_path"] is not None
+
+
+@pytest.mark.asyncio
+async def test_emit_notify_hub_alert_with_image(tmp_path: Any) -> None:
+    from pathlib import Path
+    from pydantic import SecretStr
+    import httpx
+    from publisher.notify_alert import emit_notify_hub_alert
+
+    test_img = Path(tmp_path) / "test_qr.png"
+    test_img.write_bytes(b"dummy-png-data")
+
+    settings = PublisherSettings(
+        notify_event_url="http://hub.test/api/v1/events",
+        notify_api_key=SecretStr("test-key"),
+        notify_recipient_ids=["admin_user"],
+    )
+
+    upload_called = False
+    event_called = False
+
+    async def mock_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal upload_called, event_called
+        if request.url.path == "/api/v1/media":
+            upload_called = True
+            assert request.headers.get("X-API-Key") == "test-key"
+            return httpx.Response(201, json={"id": "media_test_qr_123"})
+        elif request.url.path == "/api/v1/events":
+            event_called = True
+            body = request.read().decode()
+            assert "media_test_qr_123" in body
+            assert "image" in body
+            return httpx.Response(202, json={"status": "accepted"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(mock_handler)
+    with patch("httpx.AsyncClient", return_value=httpx.AsyncClient(transport=transport)):
+        res = await emit_notify_hub_alert(
+            settings,
+            event_type="publisher.wechat.verify_qr",
+            event_key="test_key_1",
+            title="验证码",
+            content="请扫码",
+            image_path=test_img,
+        )
+        assert res is True
+        assert upload_called is True
+        assert event_called is True
