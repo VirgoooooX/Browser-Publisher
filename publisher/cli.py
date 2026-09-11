@@ -17,7 +17,7 @@ def _get_api_client(base_url: str, token: str) -> httpx.Client:
         base_url=base_url.rstrip("/"),
         headers={
             "Authorization": f"Bearer {token}",
-            "User-Agent": "publisher-cli/0.1.0",
+            "User-Agent": "publisher-cli/0.2.0",
         },
         timeout=30.0,
     )

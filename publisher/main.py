@@ -95,7 +95,7 @@ def create_app(settings: PublisherSettings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Browser Publisher",
-        version="0.1.0",
+        version="0.2.0",
         description="Automated browser publishing engine for WeChat MP & Xiaohongshu",
         lifespan=lifespan,
     )

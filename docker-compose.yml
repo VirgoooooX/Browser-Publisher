@@ -1,7 +1,7 @@
 services:
   browser-publisher:
     build: .
-    image: ghcr.io/virgooooox/browser-publisher:0.1.0
+    image: ghcr.io/virgooooox/browser-publisher:0.2.0
     container_name: browser-publisher
     restart: unless-stopped
     environment:
