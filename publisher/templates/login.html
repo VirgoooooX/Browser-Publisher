@@ -3,46 +3,55 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Publisher Console - 登录</title>
+  <title>Browser Publisher - 登录控制台</title>
   <link rel="stylesheet" href="/static/console.css">
   <style>
     .login-container {
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 80vh;
+      min-height: 85vh;
+      padding: 1.5rem;
     }
     .login-card {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
       padding: 2.5rem;
       width: 100%;
       max-width: 440px;
-      box-shadow: var(--shadow);
+      box-shadow: var(--shadow-lg);
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      animation: tabFadeIn 180ms ease;
     }
     .login-header {
-      margin-bottom: 2rem;
       text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
     }
     .login-header h1 {
-      font-size: 1.5rem;
+      font-size: 1.4rem;
       font-weight: 700;
+      letter-spacing: -0.02em;
       color: var(--text-primary);
     }
     .login-header p {
       color: var(--text-secondary);
-      font-size: 0.875rem;
-      margin-top: 0.5rem;
+      font-size: 0.85rem;
+      line-height: 1.4;
     }
     .error-msg {
-      background: rgba(239, 68, 68, 0.15);
-      border: 1px solid var(--danger);
+      background: var(--status-danger-bg);
+      border: 1px solid rgba(239, 68, 68, 0.4);
       color: #fca5a5;
-      padding: 0.75rem;
-      border-radius: var(--radius);
-      font-size: 0.875rem;
-      margin-bottom: 1.25rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.85rem;
+      text-align: center;
     }
   </style>
 </head>
@@ -50,8 +59,13 @@
   <div class="login-container">
     <div class="login-card">
       <div class="login-header">
-        <h1>Browser Publisher</h1>
-        <p>输入 PUBLISHER_ACCESS_TOKEN 访问控制台</p>
+        <div class="logo-area" style="justify-content: center; margin-bottom: 0.25rem;">
+          <div class="logo-icon-pulse"></div>
+          <span class="logo-title">Browser Publisher</span>
+          <span class="logo-badge">v0.1.0</span>
+        </div>
+        <h1>控制台身份验证</h1>
+        <p>输入服务部署的 PUBLISHER_ACCESS_TOKEN 访问会话监控与任务管理</p>
       </div>
 
       {% if error %}
@@ -60,10 +74,20 @@
 
       <form action="/console/login" method="POST">
         <div class="form-group">
-          <label for="token">Access Token</label>
-          <input type="password" id="token" name="token" required placeholder="输入访问密钥" autofocus>
+          <label for="token">Access Token 访问密钥</label>
+          <input
+            type="password"
+            id="token"
+            name="token"
+            required
+            placeholder="输入高强度访问密钥"
+            autofocus
+            style="width: 100%;"
+          >
         </div>
-        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">登录控制台</button>
+        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 0.5rem; padding: 0.65rem;">
+          进入管理控制台
+        </button>
       </form>
     </div>
   </div>

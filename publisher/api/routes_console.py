@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from publisher.config import PublisherSettings
 from publisher.models import PlatformState, PublishJob
@@ -104,8 +104,39 @@ async def console_dashboard(
             )
 
         # 2. Fetch recent jobs
-        j_stmt = select(PublishJob).order_by(PublishJob.created_at.desc()).limit(20)
+        j_stmt = select(PublishJob).order_by(PublishJob.created_at.desc()).limit(50)
         jobs_db = (await session.execute(j_stmt)).scalars().all()
+
+        # 3. Calculate job statistics
+        counts_stmt = select(PublishJob.status, func.count(PublishJob.id)).group_by(PublishJob.status)
+        status_counts = dict((await session.execute(counts_stmt)).all())
+
+        stats = {
+            "total": sum(status_counts.values()),
+            "succeeded": status_counts.get("published", 0) + status_counts.get("draft_saved", 0),
+            "running": (
+                status_counts.get("running", 0)
+                + status_counts.get("queued", 0)
+                + status_counts.get("waiting_auth", 0)
+                + status_counts.get("waiting_manual_confirm", 0)
+            ),
+            "failed": status_counts.get("failed", 0) + status_counts.get("publish_unknown", 0),
+        }
+
+        config_info = {
+            "version": "0.1.0",
+            "data_dir": str(settings.data_dir),
+            "port": settings.port,
+            "headless": settings.headless,
+            "wechat_mp_app_id_configured": bool(settings.wechat_mp_app_id),
+            "wechat_mp_secret_configured": settings.wechat_mp_app_secret is not None,
+            "wechat_mp_api_base_url": settings.wechat_mp_api_base_url,
+            "wechat_mp_default_mode": settings.wechat_mp_default_mode,
+            "wechat_mp_author": settings.wechat_mp_author,
+            "xhs_default_mode": settings.xhs_default_mode,
+            "xhs_min_interval_seconds": settings.xhs_min_interval_seconds,
+            "notify_alert_configured": bool(settings.notify_event_url and settings.notify_api_key),
+        }
 
         return templates.TemplateResponse(
             request=request,
@@ -113,5 +144,7 @@ async def console_dashboard(
             context={
                 "platforms": platforms_list,
                 "jobs": jobs_db,
+                "stats": stats,
+                "config": config_info,
             },
         )

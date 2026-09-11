@@ -9,8 +9,10 @@
 <body>
   <header>
     <div class="logo-area">
+      <div class="logo-icon-pulse" title="Worker 运行正常"></div>
       <span class="logo-title">Browser Publisher</span>
-      <span class="logo-badge">v0.1.0</span>
+      <span class="logo-badge">v{{ config.version if config and config.version else '0.1.0' }}</span>
+      <span class="header-meta-tag">ADR-033 PUBLISHING GATEWAY</span>
     </div>
     <div class="user-area">
       <form action="/console/logout" method="POST" style="margin: 0;">
@@ -20,14 +22,86 @@
   </header>
 
   <main>
-    <!-- Platform Sessions Section -->
-    <section>
-      <div class="grid-cards">
+    <!-- 顶部四项关键指标条 -->
+    <section class="stats-strip">
+      <div class="stat-card">
+        <span class="stat-label">总任务数</span>
+        <span class="stat-value">{{ stats.total if stats else jobs|length }}</span>
+        <span class="stat-sub">自服务启动以来累计调度</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">发布成功 / 已存草稿</span>
+        <span class="stat-value text-success">{{ stats.succeeded if stats else 0 }}</span>
+        <span class="stat-sub">正常交付到微信与小红书</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">活跃排队 / 执行中</span>
+        <span class="stat-value text-info">{{ stats.running if stats else 0 }}</span>
+        <span class="stat-sub">单串行 Worker 顺序消化</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">异常 / 风控暂停</span>
+        <span class="stat-value text-danger">{{ stats.failed if stats else 0 }}</span>
+        <span class="stat-sub">遇到验证码自动熔断保护</span>
+      </div>
+    </section>
+
+    <!-- Tab 选项卡导航 -->
+    <nav class="tabs-nav" aria-label="控制台分区导航" role="tablist">
+      <button
+        id="tab-btn-sessions"
+        type="button"
+        role="tab"
+        class="tab-btn active"
+        onclick="switchTab('sessions')"
+      >
+        <span class="brand-dot" style="background-color: var(--accent-primary);"></span>
+        <span>平台会话监控</span>
+      </button>
+
+      <button
+        id="tab-btn-jobs"
+        type="button"
+        role="tab"
+        class="tab-btn"
+        onclick="switchTab('jobs')"
+      >
+        <span>任务队列与历史</span>
+        <span class="tab-count" id="tabJobsCount">{{ jobs|length }}</span>
+      </button>
+
+      <button
+        id="tab-btn-manual"
+        type="button"
+        role="tab"
+        class="tab-btn"
+        onclick="switchTab('manual')"
+      >
+        <span>手动发布测试</span>
+      </button>
+
+      <button
+        id="tab-btn-config"
+        type="button"
+        role="tab"
+        class="tab-btn"
+        onclick="switchTab('config')"
+      >
+        <span>节点配置与规范</span>
+      </button>
+    </nav>
+
+    <!-- TAB 1: 平台会话监控 (Sessions) -->
+    <section id="panel-sessions" class="tab-panel active">
+      <div class="platforms-grid">
         {% for p in platforms %}
-        <div class="card" id="card-{{ p.platform }}">
+        <div class="card platform-card {% if p.platform == 'wechat_mp' %}wechat-card{% else %}xhs-card{% endif %}" id="card-{{ p.platform }}">
           <div class="card-header">
             <div class="card-title">
-              {% if p.platform == "wechat_mp" %}微信公众号{% else %}小红书{% endif %}
+              <span class="platform-brand-badge">
+                <span class="brand-dot {% if p.platform == 'wechat_mp' %}wechat{% else %}xhs{% endif %}"></span>
+                {% if p.platform == "wechat_mp" %}微信公众号 (WeChat MP){% else %}小红书 (Xiaohongshu){% endif %}
+              </span>
             </div>
             {% if p.is_paused %}
             <span class="status-badge status-paused">风控暂停 (PAUSED)</span>
@@ -36,27 +110,51 @@
             {% endif %}
           </div>
 
-          <div class="info-row">
-            <span class="info-label">会话状态</span>
-            <span class="info-val">{{ p.session_state }}</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">当前运行任务</span>
-            <span class="info-val">{{ p.current_job_id or '无' }}</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">最近发布时间</span>
-            <span class="info-val">{{ p.last_publish_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_publish_at else '无' }}</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">最近认证时间</span>
-            <span class="info-val">{{ p.last_auth_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_auth_at else '无' }}</span>
+          <div class="info-rows-group">
+            <div class="info-row">
+              <span class="info-label">会话状态</span>
+              <span class="info-val" style="color: {% if p.session_state == 'ready' %}var(--status-ready){% elif p.session_state == 'auth_required' %}var(--status-warning){% else %}var(--text-primary){% endif %};">
+                {{ p.session_state }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">当前运行任务</span>
+              <span class="info-val">{{ p.current_job_id or '空闲 (IDLE)' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">最近发表时间</span>
+              <span class="info-val">{{ p.last_publish_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_publish_at else '无历史记录' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">最近认证时间</span>
+              <span class="info-val">{{ p.last_auth_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_auth_at else '无历史记录' }}</span>
+            </div>
+
+            {% if p.platform == "wechat_mp" %}
+            <div class="info-row">
+              <span class="info-label">草稿创建模式</span>
+              <span class="info-val" style="color: #6ee7b7;">
+                {% if config and config.wechat_mp_app_id_configured %}
+                官方 API 直连草稿 (ADR-033)
+                {% else %}
+                Playwright 网页模拟草稿
+                {% endif %}
+              </span>
+            </div>
+            {% else %}
+            <div class="info-row">
+              <span class="info-label">防风控冷却间隔</span>
+              <span class="info-val" style="color: #fca5a5;">
+                {{ config.xhs_min_interval_seconds if config else 1800 }} 秒 (30分钟强制隔离)
+              </span>
+            </div>
+            {% endif %}
           </div>
 
           {% if p.is_paused and p.paused_reason %}
-          <div class="info-row" style="color: #f472b6;">
-            <span class="info-label" style="color: #f472b6;">暂停原因</span>
-            <span class="info-val">{{ p.paused_reason }}</span>
+          <div class="paused-alert-box">
+            <span class="paused-title">风控熔断暂停中</span>
+            <span class="paused-desc">{{ p.paused_reason }}</span>
           </div>
           {% endif %}
 
@@ -76,115 +174,118 @@
         </div>
         {% endfor %}
       </div>
+
+      <!-- Worker 引擎与底层规格说明 -->
+      <div class="card" style="margin-top: 0.5rem;">
+        <div class="card-header">
+          <h2 class="card-title">执行引擎与系统规格</h2>
+          <span class="status-badge status-ready">Worker Active</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem;">
+          <div class="info-row">
+            <span class="info-label">任务处理架构</span>
+            <span class="info-val">单串行 Chromium Worker (防止 Profile 文件锁冲突)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">数据存储引擎</span>
+            <span class="info-val">SQLite + WAL 模式 (事务外键约束与 busy_timeout=30s)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">无头模式 (Headless)</span>
+            <span class="info-val">{{ '已启用 (Headless=True)' if config and config.headless else '禁用' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Notify Hub 联动</span>
+            <span class="info-val">{{ '已配置健康告警回调' if config and config.notify_alert_configured else '独立运行 (未配事件上报)' }}</span>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- Manual Publish Section -->
-    <section class="card">
-      <div class="card-header">
-        <h2 class="card-title">手动提交发布任务</h2>
-      </div>
-      <form id="publishForm" onsubmit="submitManualJob(event)">
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
-          <div class="form-group">
-            <label for="formPlatform">目标平台</label>
-            <select id="formPlatform" name="platform" onchange="onPlatformChange()">
-              <option value="wechat_mp">微信公众号 (wechat_mp)</option>
-              <option value="xiaohongshu">小红书 (xiaohongshu)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="formMode">发布模式</label>
-            <select id="formMode" name="mode">
-              <option value="draft">存草稿 (draft)</option>
-              <option value="publish" selected>直接发表 (publish)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="formAuthor">作者</label>
-            <input type="text" id="formAuthor" name="author" value="Publisher Console">
-          </div>
+    <!-- TAB 2: 任务中心与历史 (Jobs) -->
+    <section id="panel-jobs" class="tab-panel">
+      <!-- 过滤工具栏 -->
+      <div class="jobs-toolbar">
+        <div class="toolbar-filters">
+          <select id="filterPlatform" class="select-filter" onchange="applyJobFilters()">
+            <option value="">所有目标平台</option>
+            <option value="wechat_mp">微信公众号 (wechat_mp)</option>
+            <option value="xiaohongshu">小红书 (xiaohongshu)</option>
+          </select>
+
+          <select id="filterStatus" class="select-filter" onchange="applyJobFilters()">
+            <option value="">所有执行状态</option>
+            <option value="queued">排队中 (queued)</option>
+            <option value="running">执行中 (running)</option>
+            <option value="published">已发表 (published)</option>
+            <option value="draft_saved">已存草稿 (draft_saved)</option>
+            <option value="failed">失败 (failed)</option>
+            <option value="waiting_manual_confirm">等待人工确认 (waiting)</option>
+          </select>
+
+          <input
+            type="text"
+            id="searchKeyword"
+            class="search-input"
+            placeholder="搜索标题或任务ID..."
+            oninput="applyJobFilters()"
+          />
         </div>
 
-        <div class="form-group">
-          <label for="formTitle">标题</label>
-          <input type="text" id="formTitle" name="title" required placeholder="文章或笔记标题">
+        <div class="toolbar-actions">
+          <span class="poll-indicator">
+            <span class="poll-dot"></span>
+            <span>自动刷新中</span>
+          </span>
+          <button class="btn btn-secondary btn-sm" onclick="reloadJobs()">立即刷新</button>
         </div>
-
-        <div class="form-group">
-          <label for="formDigest">摘要 (可选)</label>
-          <input type="text" id="formDigest" name="digest" placeholder="文章摘要">
-        </div>
-
-        <div class="form-group">
-          <label for="formBodyText">正文文本 (纯文本，小红书必填)</label>
-          <textarea id="formBodyText" name="body_text" rows="4" placeholder="正文内容"></textarea>
-        </div>
-
-        <div class="form-group" id="bodyHtmlGroup">
-          <label for="formBodyHtml">正文 HTML (可选，仅微信公众号支持)</label>
-          <textarea id="formBodyHtml" name="body_html" rows="4" placeholder="<p>富文本内容</p>"></textarea>
-        </div>
-
-        <div class="form-group">
-          <label for="formMediaUrl">图片 URL (多张请用逗号或换行分隔)</label>
-          <textarea id="formMediaUrl" name="media_urls" rows="2" placeholder="https://example.com/cover.jpg"></textarea>
-        </div>
-
-        <div class="form-group">
-          <label for="formFile">本地图片上传</label>
-          <input type="file" id="formFile" accept="image/jpeg,image/png,image/webp" multiple>
-        </div>
-
-        <button type="submit" class="btn btn-primary" style="margin-top: 1rem;">入队发布任务</button>
-      </form>
-    </section>
-
-    <!-- Recent Jobs Table Section -->
-    <section class="card">
-      <div class="card-header">
-        <h2 class="card-title">最近发布任务</h2>
-        <button class="btn btn-secondary btn-sm" onclick="reloadJobs()">刷新列表</button>
       </div>
 
-      <div style="overflow-x: auto;">
+      <!-- 任务表格 -->
+      <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>ID</th>
+              <th>任务 ID</th>
               <th>平台</th>
               <th>模式</th>
               <th>状态</th>
-              <th>阶段</th>
+              <th>阶段 (Phase)</th>
               <th>标题</th>
-              <th>结果 / 链接</th>
-              <th>创建时间</th>
+              <th>最终结果 / 链接</th>
+              <th>提交时间</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="jobsTableBody">
             {% for job in jobs %}
-            <tr>
-              <td class="info-val">{{ job.id }}</td>
-              <td>{{ job.platform }}</td>
-              <td>{{ job.mode }}</td>
+            <tr data-platform="{{ job.platform }}" data-status="{{ job.status }}">
+              <td class="col-id" title="{{ job.id }}">{{ job.id[:16] }}...</td>
+              <td>
+                <span class="brand-dot {% if job.platform == 'wechat_mp' %}wechat{% else %}xhs{% endif %}" style="display:inline-block; margin-right:4px;"></span>
+                {% if job.platform == 'wechat_mp' %}公众号{% else %}小红书{% endif %}
+              </td>
+              <td><span class="status-badge status-idle">{{ job.mode }}</span></td>
               <td><span class="status-badge status-{{ job.status }}">{{ job.status }}</span></td>
-              <td>{{ job.publish_phase or '-' }}</td>
-              <td>{{ job.content.get('title', '') }}</td>
+              <td><span class="info-val">{{ job.publish_phase or '-' }}</span></td>
+              <td class="col-title" title="{{ job.content.get('title', '') }}">{{ job.content.get('title', '-') }}</td>
               <td>
                 {% if job.final_url %}
-                <a href="{{ job.final_url }}" target="_blank" style="color: var(--accent-primary);">打开链接</a>
+                <a href="{{ job.final_url }}" target="_blank" class="link-external">打开链接 ↗</a>
                 {% elif job.error_code %}
-                <span style="color: var(--danger);" title="{{ job.error_summary }}">{{ job.error_code }}</span>
+                <span style="color: var(--status-danger);" title="{{ job.error_summary }}">{{ job.error_code }}</span>
                 {% else %}
                 -
                 {% endif %}
               </td>
-              <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td style="color: var(--text-tertiary); font-family: var(--font-mono); font-size: 0.78rem;">
+                {{ job.created_at.strftime('%m-%d %H:%M:%S') }}
+              </td>
               <td>
                 {% if job.status in ['queued', 'running', 'waiting_manual_confirm'] %}
                 <button class="btn btn-danger btn-sm" onclick="cancelJob('{{ job.id }}')">取消</button>
                 {% else %}
-                -
+                <button class="btn btn-secondary btn-sm" onclick="viewJobDetail('{{ job.id }}')">详情</button>
                 {% endif %}
               </td>
             </tr>
@@ -193,48 +294,361 @@
         </table>
       </div>
     </section>
+
+    <!-- TAB 3: 手动发布测试 (Manual) -->
+    <section id="panel-manual" class="tab-panel">
+      <div class="manual-publish-grid">
+        <!-- 左侧：表单 -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">手动提交发布任务</h2>
+            <span class="logo-badge">REST API 模拟</span>
+          </div>
+
+          <form id="publishForm" onsubmit="submitManualJob(event)">
+            <div class="segmented-platform-picker">
+              <button
+                type="button"
+                id="btn-pick-wechat"
+                class="platform-choice-btn selected-wechat"
+                onclick="setFormPlatform('wechat_mp')"
+              >
+                <span class="brand-dot wechat"></span>
+                微信公众号 (WeChat MP)
+              </button>
+              <button
+                type="button"
+                id="btn-pick-xhs"
+                class="platform-choice-btn"
+                onclick="setFormPlatform('xiaohongshu')"
+              >
+                <span class="brand-dot xhs"></span>
+                小红书 (Xiaohongshu)
+              </button>
+            </div>
+            <input type="hidden" id="formPlatform" name="platform" value="wechat_mp">
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+              <div class="form-group">
+                <label for="formMode">发布模式</label>
+                <select id="formMode" name="mode">
+                  <option value="draft">存草稿 (draft)</option>
+                  <option value="publish" selected>直接发表 (publish)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="formAuthor">作者签名</label>
+                <input type="text" id="formAuthor" name="author" value="{{ config.wechat_mp_author if config else 'Notify Hub' }}">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="formTitle">
+                <span>文章 / 笔记标题</span>
+                <span id="titleCounter" class="label-counter">0/20</span>
+              </label>
+              <input
+                type="text"
+                id="formTitle"
+                name="title"
+                required
+                placeholder="输入标题"
+                oninput="updateFormCounters()"
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="formDigest">文章摘要 (可选)</label>
+              <input type="text" id="formDigest" name="digest" placeholder="文章或图文摘要（仅在公众号或分享时展现）">
+            </div>
+
+            <div class="form-group">
+              <label for="formBodyText">正文文本 (纯文本，小红书必填)</label>
+              <textarea
+                id="formBodyText"
+                name="body_text"
+                rows="4"
+                placeholder="输入文本内容..."
+              ></textarea>
+            </div>
+
+            <div class="form-group" id="bodyHtmlGroup">
+              <label for="formBodyHtml">正文 HTML (可选，仅微信公众号支持)</label>
+              <textarea
+                id="formBodyHtml"
+                name="body_html"
+                rows="4"
+                placeholder="<p>支持富文本与排版段落...</p>"
+              ></textarea>
+            </div>
+
+            <div class="form-group">
+              <label for="formMediaUrl">
+                <span>图片 URL 列表 (多张换行或逗号分隔)</span>
+                <span id="mediaCounter" class="label-counter">0 张</span>
+              </label>
+              <textarea
+                id="formMediaUrl"
+                name="media_urls"
+                rows="2"
+                placeholder="https://example.com/cover.jpg"
+                oninput="updateFormCounters()"
+              ></textarea>
+            </div>
+
+            <div class="form-group">
+              <label for="formFile">本地图片直接上传 (可选)</label>
+              <input type="file" id="formFile" accept="image/jpeg,image/png,image/webp" multiple>
+              <span class="field-help-text">支持 jpg / png / webp，上传后由本地媒体服务转存为临时素材。</span>
+            </div>
+
+            <button type="submit" id="btnSubmitJob" class="btn btn-primary" style="width: 100%; margin-top: 0.5rem;">
+              提交任务入队
+            </button>
+          </form>
+        </div>
+
+        <!-- 右侧：平台规范提示 -->
+        <div class="guidelines-card">
+          <div class="guidelines-header">
+            <span>平台风控与发布规则速览</span>
+          </div>
+
+          <div id="guideWechat">
+            <ul class="rule-checklist">
+              <li><strong>草稿自动化</strong>：已配置 AppID/Secret 时，服务直接走微信官方 API 上传素材建草稿，再由 Playwright 发表；</li>
+              <li><strong>留言开关</strong>：官方 API 草稿固定自动开启留言 (`need_open_comment=1`)；</li>
+              <li><strong>群通知关闭</strong>：网页端发表前自动关闭“群发通知 / 发送群通知”，静默发表不扰民；</li>
+              <li><strong>人工安全确认</strong>：若微信后台要求扫码确认，任务自动进入 `waiting_manual_confirm`，仅轮询结果，绝不重复点击。</li>
+            </ul>
+          </div>
+
+          <div id="guideXhs" style="display: none;">
+            <ul class="rule-checklist">
+              <li><strong>标题长度</strong>：小红书标题严格限制在 <strong style="color: #ff4d67;">20 字符以内</strong>，超长会被平台拦截；</li>
+              <li><strong>图片张数</strong>：图文笔记图片张数严格限制在 <strong style="color: #ff4d67;">1 ~ 18 张</strong> 之间；</li>
+              <li><strong>封面规格</strong>：推荐采用 3:4 竖版动态排版大图；</li>
+              <li><strong>防风控间隔</strong>：发布器强制实行 <strong style="color: #ff4d67;">1800 秒（30分钟）</strong> 冷却隔离保护。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: 节点配置与规范 (Config) -->
+    <section id="panel-config" class="tab-panel">
+      <div class="config-grid">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">节点运行环境变量 (Audit)</h2>
+            <span class="logo-badge">CONFIG</span>
+          </div>
+          <div class="info-rows-group">
+            <div class="info-row">
+              <span class="info-label">服务监听端口</span>
+              <span class="info-val">{{ config.port if config else 8790 }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">数据持久化目录</span>
+              <span class="info-val">{{ config.data_dir if config else './data' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Chromium 无头模式</span>
+              <span class="info-val">{{ 'True (纯后台运行)' if config and config.headless else 'False' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">公众号 AppID 配置</span>
+              <span class="info-val">{{ '已配置 (官方 API 启用)' if config and config.wechat_mp_app_id_configured else '未配置 (网页兼容模式)' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">公众号 API 端点</span>
+              <span class="info-val">{{ config.wechat_mp_api_base_url if config else 'https://api.weixin.qq.com' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">小红书冷却设定</span>
+              <span class="info-val">{{ config.xhs_min_interval_seconds if config else 1800 }}s</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">架构设计原则 (ADR-033)</h2>
+            <span class="status-badge status-ready">ACCEPTED</span>
+          </div>
+          <ul class="rule-checklist" style="gap: 0.8rem;">
+            <li><strong>网关独占凭据</strong>：Browser Publisher 独占公众号 AppID/Secret，负责素材上传与草稿创建，Notify Hub 保持轻量与纯调度；</li>
+            <li><strong>防风控熔断铁律</strong>：严禁任何伪造浏览器指纹或打码平台破解；遇验证码自动暂停并告警，由人工在控制台确认；</li>
+            <li><strong>两阶段幂等保护</strong>：一旦点击发表进入只读 reconcile 流程，绝不重复触发第二次点击。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
   </main>
 
-  <!-- QR Code Modal -->
+  <!-- 二维码扫码 Modal -->
   <div id="qrModal" class="qr-modal">
     <div class="qr-content">
-      <h3 id="qrTitle">扫码登录</h3>
-      <div id="qrLoading" style="padding: 2rem; color: var(--text-secondary); font-size: 0.95rem;">正在加载二维码...</div>
-      <img id="qrImage" class="qr-img" src="" alt="二维码" style="display: none;"
-           onload="document.getElementById('qrLoading').style.display='none'; this.style.display='block';"
-           onerror="document.getElementById('qrLoading').innerText='当前无可用二维码（可能平台已登录），可点击下方【刷新】检测'; this.style.display='none';">
-      <p id="qrHint" style="font-size: 0.875rem; color: var(--text-secondary);">请打开对应客户端扫码确认登录</p>
-      <div style="display: flex; gap: 0.5rem; justify-content: center;">
+      <div id="qrPlatformTag" class="qr-platform-tag status-ready">微信公众号</div>
+      <h3 id="qrTitle" style="font-size: 1.15rem; font-weight: 700;">扫码登录</h3>
+      
+      <div class="qr-img-wrap">
+        <div id="qrLoading" class="qr-loading-spinner">
+          <div class="spinner"></div>
+          <span>正在检查会话与生成二维码...</span>
+        </div>
+        <img
+          id="qrImage"
+          class="qr-img"
+          src=""
+          alt="二维码"
+          style="display: none;"
+          onload="document.getElementById('qrLoading').style.display='none'; this.style.display='block';"
+          onerror="document.getElementById('qrLoading').innerHTML='<span>当前无可用二维码，请点击刷新检测</span>'; this.style.display='none';"
+        >
+      </div>
+
+      <p id="qrHint" style="font-size: 0.8rem; color: var(--text-secondary);">
+        请打开对应客户端扫码授权，登录完成后弹窗将自动识别并关闭
+      </p>
+
+      <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeQrModal()">关闭</button>
         <button id="refreshQrBtn" class="btn btn-primary" onclick="refreshQr()">刷新二维码</button>
       </div>
     </div>
   </div>
 
+  <!-- 任务详情查看 Modal -->
+  <div id="jobDetailModal" class="qr-modal">
+    <div class="qr-content" style="max-width: 600px; text-align: left;">
+      <div class="card-header" style="border: none; padding: 0;">
+        <h3 id="jobDetailTitle" style="font-size: 1.1rem; font-weight: 700;">任务详情</h3>
+        <button class="btn btn-secondary btn-sm" onclick="closeJobDetailModal()">✕</button>
+      </div>
+      <div id="jobDetailBody" style="max-height: 400px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-base); padding: 1rem; border-radius: var(--radius-sm);">
+        正在加载...
+      </div>
+      <div class="modal-actions" style="justify-content: flex-end;">
+        <button class="btn btn-secondary" onclick="closeJobDetailModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 浮动通知容器 -->
+  <div id="toastContainer" class="toast-container"></div>
+
   <script>
     let activeQrPlatform = null;
     let qrPollInterval = null;
+    let jobsPollInterval = null;
 
-    function onPlatformChange() {
-      const p = document.getElementById('formPlatform').value;
-      const htmlGroup = document.getElementById('bodyHtmlGroup');
-      if (p === 'xiaohongshu') {
-        htmlGroup.style.display = 'none';
-      } else {
-        htmlGroup.style.display = 'flex';
+    // Toast 提示
+    function showToast(msg, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.innerText = msg;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        toast.style.transition = 'all 200ms ease';
+        setTimeout(() => toast.remove(), 200);
+      }, 3000);
+    }
+
+    // Tab 切换逻辑
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+
+      const activeBtn = document.getElementById('tab-btn-' + tabId);
+      const activePanel = document.getElementById('panel-' + tabId);
+      if (activeBtn) activeBtn.classList.add('active');
+      if (activePanel) activePanel.classList.add('active');
+
+      if (history.replaceState) {
+        history.replaceState(null, null, '#' + tabId);
       }
     }
 
+    // 初始化检查 URL Hash
+    window.addEventListener('DOMContentLoaded', () => {
+      const hash = location.hash.replace('#', '');
+      if (['sessions', 'jobs', 'manual', 'config'].includes(hash)) {
+        switchTab(hash);
+      }
+      updateFormCounters();
+    });
+
+    // 表单平台选择切换
+    function setFormPlatform(platform) {
+      document.getElementById('formPlatform').value = platform;
+      const btnWechat = document.getElementById('btn-pick-wechat');
+      const btnXhs = document.getElementById('btn-pick-xhs');
+      const htmlGroup = document.getElementById('bodyHtmlGroup');
+      const guideWechat = document.getElementById('guideWechat');
+      const guideXhs = document.getElementById('guideXhs');
+
+      if (platform === 'wechat_mp') {
+        btnWechat.className = 'platform-choice-btn selected-wechat';
+        btnXhs.className = 'platform-choice-btn';
+        htmlGroup.style.display = 'flex';
+        guideWechat.style.display = 'block';
+        guideXhs.style.display = 'none';
+      } else {
+        btnWechat.className = 'platform-choice-btn';
+        btnXhs.className = 'platform-choice-btn selected-xhs';
+        htmlGroup.style.display = 'none';
+        guideWechat.style.display = 'none';
+        guideXhs.style.display = 'block';
+      }
+      updateFormCounters();
+    }
+
+    // 表单计数器
+    function updateFormCounters() {
+      const platform = document.getElementById('formPlatform').value;
+      const title = document.getElementById('formTitle').value.trim();
+      const titleCounter = document.getElementById('titleCounter');
+      if (platform === 'xiaohongshu') {
+        titleCounter.innerText = `${title.length}/20 字符`;
+        titleCounter.className = title.length > 20 ? 'label-counter over-limit' : 'label-counter';
+      } else {
+        titleCounter.innerText = `${title.length} 字符`;
+        titleCounter.className = 'label-counter';
+      }
+
+      const mediaUrlsRaw = document.getElementById('formMediaUrl').value.trim();
+      const count = mediaUrlsRaw ? mediaUrlsRaw.split(/[\n,]+/).filter(x => x.trim()).length : 0;
+      const mediaCounter = document.getElementById('mediaCounter');
+      if (platform === 'xiaohongshu') {
+        mediaCounter.innerText = `${count}/18 张`;
+        mediaCounter.className = (count < 1 || count > 18) ? 'label-counter over-limit' : 'label-counter';
+      } else {
+        mediaCounter.innerText = `${count} 张`;
+        mediaCounter.className = 'label-counter';
+      }
+    }
+
+    // 扫码弹窗
     async function showQrModal(platform) {
       activeQrPlatform = platform;
-      document.getElementById('qrTitle').innerText = (platform === 'wechat_mp' ? '微信公众号' : '小红书') + ' 扫码登录';
+      const title = platform === 'wechat_mp' ? '微信公众号 扫码登录' : '小红书 扫码登录';
+      document.getElementById('qrTitle').innerText = title;
+      const tag = document.getElementById('qrPlatformTag');
+      tag.innerText = platform === 'wechat_mp' ? '微信公众平台' : '小红书创作者中心';
+      tag.className = platform === 'wechat_mp' ? 'qr-platform-tag status-ready' : 'qr-platform-tag status-paused';
+
       const loading = document.getElementById('qrLoading');
       const img = document.getElementById('qrImage');
       const hint = document.getElementById('qrHint');
       const btn = document.getElementById('refreshQrBtn');
+
       if (btn) btn.disabled = true;
-      loading.style.display = 'block';
-      loading.innerText = '正在检查登录态与生成二维码...';
+      loading.style.display = 'flex';
+      loading.innerHTML = '<div class="spinner"></div><span>正在检查会话与生成二维码...</span>';
       img.style.display = 'none';
       hint.innerText = '请打开对应客户端扫码确认登录';
       document.getElementById('qrModal').classList.add('active');
@@ -245,7 +659,8 @@
         const res = await fetch(`/v1/platforms/${platform}/login`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'already_authenticated') {
-          loading.innerText = `【${platform === 'wechat_mp' ? '微信公众号' : '小红书'}】当前登录态有效，无需重新扫码！`;
+          loading.innerHTML = `<span style="color: var(--status-ready); font-weight: 600;">✓ 当前登录态仍然有效，无需扫码！</span>`;
+          showToast('当前平台登录态仍然有效', 'success');
           setTimeout(() => {
             closeQrModal();
             location.reload();
@@ -259,11 +674,11 @@
         } else if (data.has_qr) {
           img.src = `/v1/platforms/${platform}/qr.png?t=` + Date.now();
         } else {
-          loading.innerText = '未能获取到二维码，请点击下方刷新重试。';
+          loading.innerHTML = '<span>未能捕获到二维码，请点击下方刷新重试</span>';
         }
         qrPollInterval = setInterval(pollSessionStatus, 3000);
       } catch (err) {
-        loading.innerText = '获取二维码失败：' + err;
+        loading.innerHTML = '<span>获取二维码失败：' + err + '</span>';
       } finally {
         if (btn) btn.disabled = false;
       }
@@ -287,6 +702,7 @@
         const data = await res.json();
         const p = data.platforms.find(x => x.platform === activeQrPlatform);
         if (p && p.session_state === 'ready') {
+          showToast('扫码授权成功，会话已就绪！', 'success');
           closeQrModal();
           location.reload();
         }
@@ -295,42 +711,28 @@
       }
     }
 
-    async function triggerLogin(platform) {
-      const btn = event?.target;
-      if (btn) btn.disabled = true;
-      try {
-        const res = await fetch(`/v1/platforms/${platform}/login`, { method: 'POST' });
-        const data = await res.json();
-        if (data.status === 'already_authenticated') {
-          alert(`【${platform === 'wechat_mp' ? '微信公众号' : '小红书'}】当前登录态仍然有效，无需重新扫码！`);
-          location.reload();
-          return;
-        }
-        showQrModal(platform);
-      } catch (err) {
-        alert('登录检查失败：' + err);
-      } finally {
-        if (btn) btn.disabled = false;
-      }
-    }
-
     async function reauthPlatform(platform) {
-      if (!confirm(`确定清除【${platform}】凭证并重新登录吗？`)) return;
+      if (!confirm(`确定清除【${platform === 'wechat_mp' ? '微信公众号' : '小红书'}】凭据并重新扫码吗？`)) return;
+      showToast('正在清除凭证...');
       await fetch(`/v1/platforms/${platform}/reauth`, { method: 'POST' });
       showQrModal(platform);
     }
 
     async function resumePlatform(platform) {
+      showToast('正在解除风控暂停...');
       await fetch(`/v1/platforms/${platform}/resume`, { method: 'POST' });
-      location.reload();
+      showToast('平台已恢复正常运行', 'success');
+      setTimeout(() => location.reload(), 600);
     }
 
     async function cancelJob(jobId) {
       if (!confirm(`确定取消任务 ${jobId} 吗？`)) return;
       await fetch(`/v1/jobs/${jobId}/cancel`, { method: 'POST' });
+      showToast('任务已取消', 'info');
       reloadJobs();
     }
 
+    // 手动提交任务
     async function submitManualJob(e) {
       e.preventDefault();
       const platform = document.getElementById('formPlatform').value;
@@ -342,86 +744,170 @@
       const body_html = document.getElementById('formBodyHtml').value.trim();
       const mediaUrlsRaw = document.getElementById('formMediaUrl').value.trim();
       const fileInput = document.getElementById('formFile');
+      const btn = document.getElementById('btnSubmitJob');
 
-      const media = [];
-      if (mediaUrlsRaw) {
-        mediaUrlsRaw.split(/[\n,]+/).forEach(u => {
-          if (u.trim()) media.push({ kind: 'url', url: u.trim() });
-        });
+      if (platform === 'xiaohongshu' && title.length > 20) {
+        alert('小红书笔记标题不能超过 20 字符！');
+        return;
       }
 
-      // Upload local files if selected
-      if (fileInput.files.length > 0) {
-        for (let i = 0; i < fileInput.files.length; i++) {
-          const fd = new FormData();
-          fd.append('file', fileInput.files[i]);
-          const upRes = await fetch('/v1/media', { method: 'POST', body: fd });
-          if (!upRes.ok) {
-            alert('文件上传失败：' + (await upRes.text()));
-            return;
-          }
-          const upData = await upRes.json();
-          media.push({ kind: 'uploaded', media_id: upData.media_id });
+      btn.disabled = true;
+      btn.innerText = '正在提交...';
+
+      try {
+        const media = [];
+        if (mediaUrlsRaw) {
+          mediaUrlsRaw.split(/[\n,]+/).forEach(u => {
+            if (u.trim()) media.push({ kind: 'url', url: u.trim() });
+          });
         }
-      }
 
-      const client_request_id = 'console-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
-      const payload = {
-        client_request_id,
-        platform,
-        mode,
-        content: { title, author, digest, body_text, body_html: body_html || undefined },
-        media,
-        topics: []
-      };
+        if (fileInput.files.length > 0) {
+          for (let i = 0; i < fileInput.files.length; i++) {
+            const fd = new FormData();
+            fd.append('file', fileInput.files[i]);
+            const upRes = await fetch('/v1/media', { method: 'POST', body: fd });
+            if (!upRes.ok) {
+              alert('文件上传失败：' + (await upRes.text()));
+              return;
+            }
+            const upData = await upRes.json();
+            media.push({ kind: 'uploaded', media_id: upData.media_id });
+          }
+        }
 
-      const res = await fetch('/v1/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+        const client_request_id = 'console-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+        const payload = {
+          client_request_id,
+          platform,
+          mode,
+          content: { title, author, digest, body_text, body_html: body_html || undefined },
+          media,
+          topics: []
+        };
 
-      if (res.status === 202 || res.status === 200) {
-        alert('发布任务已成功提交入队！');
-        document.getElementById('publishForm').reset();
-        reloadJobs();
-      } else {
-        const err = await res.json();
-        alert('提交失败：' + (err.detail || JSON.stringify(err)));
+        const res = await fetch('/v1/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.status === 202 || res.status === 200) {
+          showToast('发布任务已成功入队！', 'success');
+          document.getElementById('publishForm').reset();
+          updateFormCounters();
+          switchTab('jobs');
+          reloadJobs();
+        } else {
+          const err = await res.json();
+          alert('提交失败：' + (err.detail || JSON.stringify(err)));
+        }
+      } catch (err) {
+        alert('提交异常：' + err);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '提交任务入队';
       }
     }
 
+    // 重新拉取任务列表
     async function reloadJobs() {
-      const res = await fetch('/v1/jobs?page=1&page_size=20');
-      if (!res.ok) return;
-      const data = await res.json();
+      const platform = document.getElementById('filterPlatform')?.value || '';
+      const status = document.getElementById('filterStatus')?.value || '';
+      let url = `/v1/jobs?page=1&page_size=50`;
+      if (platform) url += `&platform=${encodeURIComponent(platform)}`;
+      if (status) url += `&status=${encodeURIComponent(status)}`;
+
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderJobsTable(data.items);
+        const countBadge = document.getElementById('tabJobsCount');
+        if (countBadge) countBadge.innerText = data.total || data.items.length;
+      } catch (err) {
+        console.error('reloadJobs failed', err);
+      }
+    }
+
+    function renderJobsTable(items) {
       const tbody = document.getElementById('jobsTableBody');
+      const keyword = (document.getElementById('searchKeyword')?.value || '').trim().toLowerCase();
       tbody.innerHTML = '';
-      data.items.forEach(job => {
+
+      const filtered = items.filter(job => {
+        if (!keyword) return true;
+        const title = (job.content?.title || '').toLowerCase();
+        const id = (job.id || '').toLowerCase();
+        return title.includes(keyword) || id.includes(keyword);
+      });
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; padding: 2rem; color: var(--text-tertiary);">暂无符合条件的发布任务</td></tr>`;
+        return;
+      }
+
+      filtered.forEach(job => {
         const tr = document.createElement('tr');
+        tr.setAttribute('data-platform', job.platform);
+        tr.setAttribute('data-status', job.status);
+
         const linkOrErr = job.final_url
-          ? `<a href="${job.final_url}" target="_blank" style="color: var(--accent-primary);">打开链接</a>`
-          : (job.error_code ? `<span style="color: var(--danger);">${job.error_code}</span>` : '-');
-        const cancelBtn = (job.status === 'queued' || job.status === 'waiting_auth' || job.status === 'waiting_manual_confirm')
+          ? `<a href="${job.final_url}" target="_blank" class="link-external">打开链接 ↗</a>`
+          : (job.error_code ? `<span style="color: var(--status-danger);" title="${job.error_summary || ''}">${job.error_code}</span>` : '-');
+
+        const cancelBtn = (job.status === 'queued' || job.status === 'running' || job.status === 'waiting_manual_confirm')
           ? `<button class="btn btn-danger btn-sm" onclick="cancelJob('${job.id}')">取消</button>`
-          : '-';
+          : `<button class="btn btn-secondary btn-sm" onclick="viewJobDetail('${job.id}')">详情</button>`;
+
+        const platformLabel = job.platform === 'wechat_mp' ? '公众号' : '小红书';
+        const brandClass = job.platform === 'wechat_mp' ? 'wechat' : 'xhs';
+        const timeStr = job.created_at ? job.created_at.substring(5, 19).replace('T', ' ') : '-';
+
         tr.innerHTML = `
-          <td class="info-val">${job.id}</td>
-          <td>${job.platform}</td>
-          <td>${job.mode}</td>
+          <td class="col-id" title="${job.id}">${job.id.substring(0, 16)}...</td>
+          <td><span class="brand-dot ${brandClass}" style="display:inline-block; margin-right:4px;"></span>${platformLabel}</td>
+          <td><span class="status-badge status-idle">${job.mode}</span></td>
           <td><span class="status-badge status-${job.status}">${job.status}</span></td>
-          <td>${job.publish_phase || '-'}</td>
-          <td>${job.content?.title || ''}</td>
+          <td><span class="info-val">${job.publish_phase || '-'}</span></td>
+          <td class="col-title" title="${job.content?.title || ''}">${job.content?.title || '-'}</td>
           <td>${linkOrErr}</td>
-          <td>${job.created_at.substring(5, 19).replace('T', ' ')}</td>
+          <td style="color: var(--text-tertiary); font-family: var(--font-mono); font-size: 0.78rem;">${timeStr}</td>
           <td>${cancelBtn}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    // Auto reload jobs every 10s
-    setInterval(reloadJobs, 10000);
+    function applyJobFilters() {
+      reloadJobs();
+    }
+
+    async function viewJobDetail(jobId) {
+      document.getElementById('jobDetailTitle').innerText = '任务详情: ' + jobId;
+      const body = document.getElementById('jobDetailBody');
+      body.innerHTML = '正在加载详情...';
+      document.getElementById('jobDetailModal').classList.add('active');
+
+      try {
+        const res = await fetch(`/v1/jobs/${jobId}`);
+        if (!res.ok) {
+          body.innerText = '加载失败：' + (await res.text());
+          return;
+        }
+        const data = await res.json();
+        body.innerHTML = `<pre style="margin: 0; white-space: pre-wrap; word-break: break-all;">${JSON.stringify(data, null, 2)}</pre>`;
+      } catch (err) {
+        body.innerText = '加载异常：' + err;
+      }
+    }
+
+    function closeJobDetailModal() {
+      document.getElementById('jobDetailModal').classList.remove('active');
+    }
+
+    // 定时轮询任务状态
+    jobsPollInterval = setInterval(reloadJobs, 8000);
   </script>
 </body>
 </html>
