@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob
 from publisher.platforms.base import BasePlatformPublisher
@@ -345,7 +344,7 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         self,
         job: PublishJob,
         media_paths: list[Path],
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str | None, str | None]:
         """Fill Xiaohongshu image-text note and save as draft."""
         page = await self.get_page()
         content = job.content or {}
@@ -578,16 +577,21 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         draft_id = f"xhs_draft_{job.id}"
         return draft_url, draft_id
 
-    async def open_draft(self, draft_url: str) -> None:
+    async def open_draft(
+        self, draft_url: str | None, *, job: PublishJob | None = None
+    ) -> None:
         """Open draft or navigate to notes management page."""
+        del job
         page = await self.get_page()
         await page.goto(
-            draft_url if "creator.xiaohongshu.com" in draft_url else XHS_MANAGE_URL,
+            draft_url
+            if draft_url and "creator.xiaohongshu.com" in draft_url
+            else XHS_MANAGE_URL,
             timeout=int(self.settings.navigation_timeout_seconds * 1000),
             wait_until="domcontentloaded",
         )
 
-    async def publish_and_confirm(self, job: PublishJob) -> None:
+    async def publish_and_confirm(self, job: PublishJob) -> str | None:
         """Click the final '发布' button on Xiaohongshu and wait for confirmation."""
         page = await self.get_page()
         await self.check_risk_control(page)

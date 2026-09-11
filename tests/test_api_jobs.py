@@ -54,6 +54,34 @@ async def test_wechat_mode_default_resolution(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_created_wechat_draft_starts_from_saved_checkpoint(
+    client: AsyncClient,
+) -> None:
+    payload = {
+        "client_request_id": "test-api-draft-checkpoint",
+        "platform": "wechat_mp",
+        "mode": "publish",
+        "platform_draft_id": "api-media-id-opaque-001",
+        "content": {
+            "title": "官方 API 草稿",
+            "body_text": "正文内容",
+            "body_html": "<p>正文内容</p>",
+        },
+    }
+
+    response = await client.post("/v1/jobs", json=payload)
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+
+    detail = await client.get(f"/v1/jobs/{job_id}")
+    assert detail.status_code == 200
+    data = detail.json()
+    assert data["status"] == "queued"
+    assert data["publish_phase"] == "draft_saved"
+    assert data["platform_draft_id"] == "api-media-id-opaque-001"
+
+
+@pytest.mark.asyncio
 async def test_xhs_mode_default_resolution(client: AsyncClient) -> None:
     payload = {
         "client_request_id": "test-req-mode-xhs",

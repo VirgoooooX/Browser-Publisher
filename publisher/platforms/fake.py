@@ -31,6 +31,7 @@ class FakePublisher(BasePlatformPublisher):
         self.should_trigger_security_check: bool = False
         self.should_trigger_rate_limit: bool = False
         self.published_url_to_return: str | None = "https://example.com/item/123"
+        self.publish_outcome: str | None = None
 
         # Tracking calls
         self.save_draft_calls = 0
@@ -58,7 +59,7 @@ class FakePublisher(BasePlatformPublisher):
         self,
         job: PublishJob,
         media_paths: list[Path],
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str | None, str | None]:
         self.save_draft_calls += 1
         if self.should_trigger_security_check:
             raise RuntimeError(
@@ -73,12 +74,15 @@ class FakePublisher(BasePlatformPublisher):
         draft_url = f"https://example.com/drafts/{draft_id}"
         return draft_url, draft_id
 
-    async def open_draft(self, draft_url: str) -> None:
+    async def open_draft(
+        self, draft_url: str | None, *, job: PublishJob | None = None
+    ) -> None:
+        del draft_url, job
         self.open_draft_calls += 1
         if self.should_fail_open_draft:
             raise self.should_fail_open_draft
 
-    async def publish_and_confirm(self, job: PublishJob) -> None:
+    async def publish_and_confirm(self, job: PublishJob) -> str | None:
         self.publish_and_confirm_calls += 1
         if self.should_trigger_security_check:
             raise RuntimeError(
@@ -88,6 +92,7 @@ class FakePublisher(BasePlatformPublisher):
             raise RuntimeError("RATE_LIMIT_TRIGGERED: Fake rate limit exceeded")
         if self.should_fail_publish:
             raise self.should_fail_publish
+        return self.publish_outcome
 
     async def verify_published(
         self, job: PublishJob, start_time: datetime

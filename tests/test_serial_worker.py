@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from publisher.config import PublisherSettings
 from publisher.models import PlatformState, PublishJob, generate_id, utc_now
 from publisher.platforms.fake import FakePublisher
 from publisher.worker.serial_worker import SerialWorker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
@@ -162,6 +163,180 @@ async def test_draft_saved_without_platform_id_resumes_without_new_draft(
     assert pub.save_draft_calls == 0
     assert pub.open_draft_calls == 1
     assert pub.publish_and_confirm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_api_draft_creation_recovery_never_retries_unknown_request(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="api-draft-unknown-recovery-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="running",
+                publish_phase="api_creating_draft",
+                content={"title": "未知草稿结果", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    await worker._recover_running_jobs()
+
+    async with session_factory() as session:
+        recovered = await session.get(PublishJob, job_id)
+        assert recovered is not None
+        assert recovered.status == "failed"
+        assert recovered.error_code == "DRAFT_API_RESULT_UNKNOWN"
+        assert recovered.publish_phase == "api_creating_draft"
+
+    assert pub.save_draft_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_api_draft_checkpoint_publishes_without_creating_browser_draft(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="api-draft-publish-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                publish_phase="draft_saved",
+                platform_draft_id="api-media-id-opaque-001",
+                final_url=None,
+                content={"title": "API 草稿发布", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 0
+    assert pub.open_draft_calls == 1
+    assert pub.publish_and_confirm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_confirmation_waits_and_only_reconciles(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    pub.publish_outcome = "waiting_manual_confirm"
+    pub.published_url_to_return = None
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="manual-confirm-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                publish_phase="draft_saved",
+                platform_draft_id="api-media-id-manual-001",
+                content={"title": "等待确认", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    async with session_factory() as session:
+        waiting = await session.get(PublishJob, job_id)
+        assert waiting is not None
+        assert waiting.status == "waiting_manual_confirm"
+        assert waiting.publish_phase == "waiting_manual_confirm"
+        assert waiting.attempt_count == 1
+
+    assert pub.publish_and_confirm_calls == 1
+    assert pub.verify_published_calls == 0
+
+    # A polling pass must not click publish again.
+    assert await worker._run_next_eligible_job() is True
+    assert pub.publish_and_confirm_calls == 1
+    assert pub.verify_published_calls == 1
+
+    pub.published_url_to_return = "https://example.com/manual-confirmed"
+    assert await worker._run_next_eligible_job() is True
+    assert pub.publish_and_confirm_calls == 1
+    assert pub.verify_published_calls == 2
+    async with session_factory() as session:
+        published = await session.get(PublishJob, job_id)
+        assert published is not None
+        assert published.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_publish_not_started_is_not_treated_as_post_click_reconcile(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    pub.should_fail_publish = RuntimeError(
+        "PUBLISH_NOT_STARTED: publish entry button was unavailable"
+    )
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="publish-not-started-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                content={"title": "未点击发表", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.publish_and_confirm_calls == 1
+    assert pub.reconcile_calls == 0
+    async with session_factory() as session:
+        failed = await session.get(PublishJob, job_id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.publish_phase == "draft_saved"
+        assert failed.error_code == "PUBLISH_NOT_STARTED"
 
 
 @pytest.mark.asyncio
@@ -483,6 +658,50 @@ async def test_auth_expired_enters_waiting_auth(
         assert p_state_resumed is not None
         assert p_state_resumed.session_state == "ready"
         assert p_state_resumed.qr_code_base64 is None
+
+
+@pytest.mark.asyncio
+async def test_auth_alert_includes_login_qr_image(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+    tmp_path: object,
+) -> None:
+    _engine, session_factory = test_db
+    test_settings.data_dir = tmp_path  # type: ignore[assignment]
+    qr_data = base64.b64encode(b"qr-image").decode("ascii")
+    pub = FakePublisher(test_settings, is_logged_in=False, qr_data=qr_data)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="auth-qr-alert-01",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                content={"title": "登录二维码告警", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    with patch(
+        "publisher.worker.serial_worker.emit_notify_hub_alert",
+        new_callable=AsyncMock,
+    ) as alert:
+        await worker._run_next_eligible_job()
+        await worker._run_next_eligible_job()
+
+    assert alert.await_count == 1
+    qr_path = alert.call_args.kwargs["image_path"]
+    assert qr_path is not None
+    assert qr_path.is_file()
+    assert qr_path.read_bytes() == b"qr-image"
 
 
 @pytest.mark.asyncio

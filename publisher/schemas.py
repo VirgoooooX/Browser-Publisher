@@ -13,6 +13,7 @@ JobStatus = Literal[
     "queued",
     "running",
     "waiting_auth",
+    "waiting_manual_confirm",
     "draft_saved",
     "published",
     "failed",
@@ -20,10 +21,12 @@ JobStatus = Literal[
     "cancelled",
 ]
 PublishPhase = Literal[
+    "api_creating_draft",
     "editing",
     "draft_saved",
     "publish_intent",
     "publish_clicked",
+    "waiting_manual_confirm",
     "reconciling",
 ]
 
@@ -62,6 +65,7 @@ class JobCreateRequest(BaseModel):
     client_request_id: str = Field(min_length=1, max_length=200)
     platform: PlatformType
     mode: PublishMode | None = None
+    platform_draft_id: str | None = Field(default=None, max_length=200)
     content: JobContent
     media: list[MediaItem] = Field(default_factory=list)
     source_url: str | None = Field(default=None, max_length=2048)
@@ -76,7 +80,8 @@ class JobCreateRequest(BaseModel):
             # XHS note title maximum 20 characters
             if len(title) > 20:
                 raise ValueError(
-                    f"Xiaohongshu note title cannot exceed 20 characters (got {len(title)}: '{title}')"
+                    "Xiaohongshu note title cannot exceed 20 characters "
+                    f"(got {len(title)}: '{title}')"
                 )
             if not body_text:
                 raise ValueError(
@@ -84,18 +89,21 @@ class JobCreateRequest(BaseModel):
                 )
             if len(body_text) > 1000:
                 raise ValueError(
-                    f"Xiaohongshu note body cannot exceed 1000 characters (got {len(body_text)})"
+                    "Xiaohongshu note body cannot exceed 1000 characters "
+                    f"(got {len(body_text)})"
                 )
             # 1 to 18 images required for Xiaohongshu
             if not (1 <= len(self.media) <= 18):
                 raise ValueError(
-                    f"Xiaohongshu image-text note requires between 1 and 18 media images (got {len(self.media)})"
+                    "Xiaohongshu image-text note requires between 1 and 18 "
+                    f"media images (got {len(self.media)})"
                 )
 
         elif self.platform == "wechat_mp":
             if len(title) > 64:
                 raise ValueError(
-                    f"WeChat Official Account title cannot exceed 64 characters (got {len(title)}: '{title}')"
+                    "WeChat Official Account title cannot exceed 64 characters "
+                    f"(got {len(title)}: '{title}')"
                 )
             if not body_text and not (
                 self.content.body_html and self.content.body_html.strip()
@@ -103,6 +111,11 @@ class JobCreateRequest(BaseModel):
                 raise ValueError(
                     "WeChat Official Account requires either body_text or body_html"
                 )
+
+        if self.platform_draft_id and self.platform != "wechat_mp":
+            raise ValueError(
+                "platform_draft_id is only supported for WeChat Official Account jobs"
+            )
 
         return self
 

@@ -71,13 +71,16 @@ async def create_job(
             platform=request_data.platform,
             mode=effective_mode,
             status="queued",
-            publish_phase=None,
+            # An official-API draft is already saved.  The worker must open
+            # and publish it instead of creating a second browser draft.
+            publish_phase="draft_saved" if request_data.platform_draft_id else None,
             content=request_data.content.model_dump(),
             media=[m.model_dump() for m in request_data.media],
             source_url=request_data.source_url,
             topics=request_data.topics,
             attempt_count=0,
             max_attempts=2,
+            platform_draft_id=request_data.platform_draft_id,
             created_at=utc_now(),
             updated_at=utc_now(),
         )
@@ -162,10 +165,13 @@ async def cancel_job(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Publish job '{job_id}' not found",
             )
-        if job.status not in ("queued", "waiting_auth"):
+        if job.status not in ("queued", "waiting_auth", "waiting_manual_confirm"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot cancel job in '{job.status}' status (only 'queued' or 'waiting_auth' can be cancelled)",
+                detail=(
+                    f"Cannot cancel job in '{job.status}' status "
+                    "(only 'queued', 'waiting_auth', or 'waiting_manual_confirm' can be cancelled)"
+                ),
             )
 
         job.status = "cancelled"

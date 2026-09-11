@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_WECHAT_MP_API_BASE_URL = "https://api.weixin.qq.com"
 
 
 class PublisherSettings(BaseSettings):
@@ -31,6 +34,34 @@ class PublisherSettings(BaseSettings):
     wechat_mp_default_mode: Literal["draft", "publish"] = Field(
         default="publish",
         description="Default publish mode for WeChat MP when mode is not specified",
+    )
+    wechat_mp_app_id: str | None = Field(
+        default=None,
+        description="WeChat Official Account AppID used by Browser Publisher",
+    )
+    wechat_mp_app_secret: SecretStr | None = Field(
+        default=None,
+        description="WeChat Official Account AppSecret used by Browser Publisher",
+    )
+    wechat_mp_api_base_url: str = Field(
+        default=DEFAULT_WECHAT_MP_API_BASE_URL,
+        description="WeChat Official Account API base URL",
+    )
+    wechat_mp_request_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=60,
+        description="Timeout for a single WeChat Official Account API request",
+    )
+    wechat_mp_token_refresh_skew_seconds: int = Field(
+        default=120,
+        ge=0,
+        description="Refresh the WeChat API token this many seconds before expiry",
+    )
+    wechat_mp_author: str = Field(
+        default="Notify Hub",
+        max_length=100,
+        description="Default author sent to the WeChat draft API",
     )
     xhs_default_mode: Literal["draft", "publish"] = Field(
         default="draft",
@@ -87,6 +118,34 @@ class PublisherSettings(BaseSettings):
         if isinstance(v, list):
             return [str(x) for x in v]
         return []
+
+    @field_validator("wechat_mp_api_base_url")
+    @classmethod
+    def validate_wechat_mp_api_url(cls, value: str) -> str:
+        value = value.strip()
+        parsed = urlsplit(value)
+        if parsed.scheme != "https":
+            raise ValueError("WeChat MP API base URL must use HTTPS")
+        if not parsed.hostname:
+            raise ValueError("WeChat MP API base URL must include a host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("WeChat MP API base URL must not include credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("WeChat MP API base URL must not include a query or fragment")
+        # Keep a trailing slash so httpx preserves a reverse-proxy path prefix
+        # when joining relative endpoint paths such as ``cgi-bin/token``.
+        return value.rstrip("/") + "/"
+
+    @property
+    def wechat_mp_api_configured(self) -> bool:
+        """Return whether Browser Publisher can call the official MP API."""
+
+        return bool(
+            self.wechat_mp_app_id
+            and self.wechat_mp_app_id.strip()
+            and self.wechat_mp_app_secret
+            and self.wechat_mp_app_secret.get_secret_value()
+        )
 
     @property
     def db_path(self) -> Path:

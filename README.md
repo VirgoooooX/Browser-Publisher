@@ -6,10 +6,22 @@ Standalone automated browser publishing service for WeChat Official Accounts (�
 
 - **独立运行**：作为无状态发布引擎独立运行，与调用方（如 Notify Hub）通过 HTTP REST API 通信。
 - **共享环境**：微信公众号与小红书共用同一个 Chromium 持久化 Profile 和单个内部串行 Worker。
-- **可靠状态机**：基于 SQLite + WAL 的任务队列持久化，支持断点续发、防重复点击、扫码等待恢复与风控熔断保护。
+- **可靠状态机**：基于 SQLite + WAL 的任务队列持久化，支持断点续发、防重复点击、人工确认等待恢复与风控熔断保护。
 - **管理控制台**：服务端轻量级 Web 控制台与 `publisher-cli` 命令行工具。
 
 ## 默认服务端口与地址
 
 - 局域网默认地址：`http://192.168.31.100:8790`
 - 内部数据目录：`/app/data`
+
+## 微信公众号发布边界
+
+Browser Publisher 是公众号发布的执行网关：在配置 `PUBLISHER_WECHAT_MP_APP_ID` / `PUBLISHER_WECHAT_MP_APP_SECRET` 时，它自己通过官方 API 上传封面并创建完整草稿，然后由 Playwright 在公众号后台找到该草稿、发起最后的「发表」动作并核对结果。Notify Hub 只提交文章任务、保存调度历史，不持有或调用公众号 API。
+
+未配置 Browser Publisher 的公众号 API 凭据时，保留旧的 Playwright 编辑器路径作为兼容兜底；该路径会在浏览器中编辑正文、上传图片和保存草稿。迁移到官方 API 后，生产环境应把公众号 AppID/Secret 放在 Browser Publisher 的环境变量中，而不是依赖 Notify Hub 的旧 `NOTIFY_HUB_MP_*` 配置。
+
+官方 API 草稿请求固定开启 `need_open_comment=1`，并允许非仅粉丝留言；后台「群发通知 / 发送群通知」选项在发表前固定关闭。若微信要求管理员人工确认，服务只发送文字告警并进入 `waiting_manual_confirm`，之后只轮询发表结果，绝不再次点击「发表」。
+
+登录态失效时仍保留登录二维码捕获；发表确认场景不截图、不转发二维码。
+
+如果公众号 API 只能通过已配置 IP 白名单的受信任代理访问，将 `PUBLISHER_WECHAT_MP_API_BASE_URL` 指向该代理的 HTTPS 入口（包括必要的路径前缀）；不要在任务请求中使用任意代理。

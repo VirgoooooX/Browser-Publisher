@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -10,14 +12,13 @@ from pathlib import Path
 
 import httpx
 import structlog
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from publisher.config import PublisherSettings
 from publisher.models import MediaAsset, PlatformState, PublishJob
 from publisher.notify_alert import emit_notify_hub_alert
 from publisher.platforms.base import BasePlatformPublisher
 from publisher.worker.clean_artifacts import clean_screenshots
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger()
 
@@ -33,7 +34,11 @@ def parse_error_code(exc: Exception) -> str:
         "CONTENT_REJECTED",
         "COVER_FAILED",
         "DRAFT_SAVE_FAILED",
+        "DRAFT_API_RESULT_UNKNOWN",
+        "DRAFT_API_REJECTED",
+        "DRAFT_OPEN_FAILED",
         "PUBLISH_QUOTA_EXHAUSTED",
+        "PUBLISH_NOT_STARTED",
         "PUBLISH_CONFIRM_FAILED",
         "PUBLISH_RESULT_UNKNOWN",
         "PROVIDER_UI_CHANGED",
@@ -112,7 +117,12 @@ class SerialWorker:
                     phase=job.publish_phase,
                     attempts=job.attempt_count,
                 )
-                if job.publish_phase in (
+                if job.publish_phase == "waiting_manual_confirm":
+                    # A human-confirmation prompt may have been open when the
+                    # worker stopped. Preserve the checkpoint and resume with
+                    # reconciliation only after restart.
+                    job.status = "waiting_manual_confirm"
+                elif job.publish_phase in (
                     "publish_intent",
                     "publish_clicked",
                     "reconciling",
@@ -122,6 +132,17 @@ class SerialWorker:
                     job.status = "queued"
                 elif job.publish_phase == "draft_saved":
                     job.status = "queued"
+                elif job.publish_phase == "api_creating_draft":
+                    # draft/add has no idempotency key. A crash in this phase
+                    # leaves the remote result ambiguous, so never call it a
+                    # second time automatically.
+                    job.status = "failed"
+                    job.error_code = "DRAFT_API_RESULT_UNKNOWN"
+                    job.error_summary = (
+                        "Worker stopped while creating a WeChat API draft; "
+                        "inspect the公众号草稿箱 before retrying manually"
+                    )
+                    job.finished_at = datetime.now(UTC)
                 elif job.publish_phase in ("editing", None):
                     if job.attempt_count < job.max_attempts:
                         job.status = "queued"
@@ -151,7 +172,7 @@ class SerialWorker:
                 await asyncio.sleep(3.0)
 
     async def _run_next_eligible_job(self) -> bool:
-        """Find the next eligible queued or waiting_auth job and process it."""
+        """Find the next eligible queued or waiting job and process it."""
         async with self.session_factory() as session:
             # 1. Check all platform states
             p_res = await session.execute(select(PlatformState))
@@ -160,7 +181,11 @@ class SerialWorker:
             # 2. Select eligible jobs
             stmt = (
                 select(PublishJob)
-                .where(PublishJob.status.in_(["queued", "waiting_auth"]))
+                .where(
+                    PublishJob.status.in_(
+                        ["queued", "waiting_auth", "waiting_manual_confirm"]
+                    )
+                )
                 .order_by(PublishJob.created_at.asc())
             )
             j_res = await session.execute(stmt)
@@ -217,12 +242,17 @@ class SerialWorker:
             # Check authentication on target platform
             is_logged_in = await publisher.check_login()
             if not is_logged_in:
-                qr_b64 = await publisher.capture_qr()
                 target_job.status = "waiting_auth"
                 p_state = platforms.get(platform_name)
                 incident_id = p_state.alert_incident_id if p_state else None
+                is_new_incident = not incident_id
                 if not incident_id:
                     incident_id = uuid.uuid4().hex[:12]
+                qr_b64 = (
+                    p_state.qr_code_base64
+                    if p_state and incident_id and p_state.qr_code_base64
+                    else await publisher.capture_qr()
+                )
 
                 await session.execute(
                     update(PlatformState)
@@ -238,19 +268,39 @@ class SerialWorker:
                 )
                 await session.commit()
 
-                # Emit alert once per incident
-                await emit_notify_hub_alert(
-                    self.settings,
-                    event_type="publisher.session.auth_required",
-                    event_key=f"auth-required-{platform_name}-{incident_id}",
-                    title=f"【{platform_name}】发布器需要扫码登录",
-                    content=(
-                        f"平台 {platform_name} 会话已过期，当前任务已暂停并进入 waiting_auth。"
-                        f"请打开控制台扫码登录：{self.settings.console_public_url}"
-                    ),
-                    level="warning",
-                    payload={"platform": platform_name, "incident_id": incident_id},
-                )
+                qr_image_path: Path | None = None
+                if qr_b64:
+                    try:
+                        raw_qr = qr_b64.split(",", 1)[-1]
+                        qr_bytes = base64.b64decode(raw_qr, validate=True)
+                        if qr_bytes:
+                            self.settings.artifacts_dir.mkdir(
+                                parents=True, exist_ok=True
+                            )
+                            qr_image_path = (
+                                self.settings.artifacts_dir
+                                / f"{platform_name}_login_{incident_id}.png"
+                            )
+                            qr_image_path.write_bytes(qr_bytes)
+                    except (binascii.Error, OSError, ValueError) as exc:
+                        logger.debug("login_qr_artifact_write_failed", error=str(exc))
+
+                # Emit one alert per auth incident; the worker polls waiting_auth
+                # jobs and must not resend the same QR on every loop.
+                if is_new_incident:
+                    await emit_notify_hub_alert(
+                        self.settings,
+                        event_type="publisher.session.auth_required",
+                        event_key=f"auth-required-{platform_name}-{incident_id}",
+                        title=f"【{platform_name}】发布器需要扫码登录",
+                        content=(
+                            f"平台 {platform_name} 会话已过期，当前任务已暂停并进入 waiting_auth。"
+                            f"请打开控制台扫码登录：{self.settings.console_public_url}"
+                        ),
+                        level="warning",
+                        payload={"platform": platform_name, "incident_id": incident_id},
+                        image_path=qr_image_path,
+                    )
                 return False
 
             # Authenticated! If platform state was auth_required, transition to ready
@@ -276,13 +326,16 @@ class SerialWorker:
                         event_type="publisher.session.recovered",
                         event_key=f"auth-recovered-{platform_name}-{old_incident}",
                         title=f"【{platform_name}】发布器登录态已恢复",
-                        content=f"平台 {platform_name} 扫码成功，会话恢复为 ready，继续执行发布队列。",
+                        content=(
+                            f"平台 {platform_name} 扫码成功，会话恢复为 ready，"
+                            "继续执行发布队列。"
+                        ),
                         level="info",
                         payload={"platform": platform_name},
                     )
 
             # Mark job running and increment attempt count if not already in reconciliation
-            if target_job.publish_phase != "reconciling":
+            if target_job.publish_phase not in ("reconciling", "waiting_manual_confirm"):
                 target_job.attempt_count += 1
             target_job.status = "running"
             if not target_job.started_at:
@@ -314,22 +367,51 @@ class SerialWorker:
 
             temp_media_files: list[Path] = []
             try:
-                # 1. Resolve media paths
+                # 1. Resolve media paths only for a new browser-created draft.
+                # API-created drafts and reconciliation do not need to fetch
+                # the cover again.
                 media_paths: list[Path] = []
-                for item in job.media:
-                    if item.get("kind") == "uploaded" and item.get("media_id"):
-                        m_id = str(item["media_id"])
-                        m_asset = await session.get(MediaAsset, m_id)
-                        if m_asset:
-                            media_paths.append(Path(m_asset.file_path))
-                    elif item.get("kind") == "url" and item.get("url"):
-                        # Download URL to temp media directory
-                        dl_path = await self._download_temp_media(str(item["url"]))
-                        if dl_path:
-                            media_paths.append(dl_path)
-                            temp_media_files.append(dl_path)
+                if (
+                    not job.platform_draft_id
+                    and job.publish_phase
+                    not in ("reconciling", "waiting_manual_confirm")
+                ):
+                    for item in job.media:
+                        if item.get("kind") == "uploaded" and item.get("media_id"):
+                            m_id = str(item["media_id"])
+                            m_asset = await session.get(MediaAsset, m_id)
+                            if m_asset:
+                                media_paths.append(Path(m_asset.file_path))
+                        elif item.get("kind") == "url" and item.get("url"):
+                            # Download URL to temp media directory
+                            dl_path = await self._download_temp_media(str(item["url"]))
+                            if dl_path:
+                                media_paths.append(dl_path)
+                                temp_media_files.append(dl_path)
 
-                # 2. Check if we are resuming from reconciling
+                # 2. Check if we are waiting for a human confirmation. This
+                # branch is strictly verify/reconcile and never clicks again.
+                if job.publish_phase == "waiting_manual_confirm":
+                    logger.info("executing_manual_confirmation_reconcile", job_id=job.id)
+                    published_url = await publisher.verify_published(job, start_time)
+                    if published_url:
+                        job.status = "published"
+                        job.final_url = published_url
+                        job.finished_at = datetime.now(UTC)
+                        job.error_code = None
+                        job.error_summary = None
+                        await self._record_platform_success(
+                            session, platform_name, job.id
+                        )
+                    else:
+                        job.status = "waiting_manual_confirm"
+                        await self._record_platform_finish(
+                            session, platform_name, job.id
+                        )
+                    await session.commit()
+                    return
+
+                # 3. Check if we are resuming from reconciling
                 if job.publish_phase == "reconciling":
                     logger.info("executing_reconciling_only", job_id=job.id)
                     published_url = await publisher.reconcile(job, start_time)
@@ -343,7 +425,10 @@ class SerialWorker:
                     else:
                         job.status = "publish_unknown"
                         job.error_code = "PUBLISH_RESULT_UNKNOWN"
-                        job.error_summary = "Reconciliation could not locate published article in management list"
+                        job.error_summary = (
+                            "Reconciliation could not locate published article "
+                            "in management list"
+                        )
                         job.finished_at = datetime.now(UTC)
                         await self._record_platform_finish(
                             session, platform_name, job.id
@@ -380,15 +465,25 @@ class SerialWorker:
                         job_id=job.id,
                         draft_id=job.platform_draft_id,
                     )
-                    if not job.final_url:
+                    if not job.final_url and not job.platform_draft_id:
                         raise RuntimeError(
-                            "DRAFT_OPEN_FAILED: Saved draft URL is unavailable"
+                            "DRAFT_OPEN_FAILED: Saved draft URL or platform draft id is unavailable"
                         )
-                    await publisher.open_draft(job.final_url)
+                    await publisher.open_draft(job.final_url, job=job)
                     job.publish_phase = "publish_intent"
                     await session.commit()
 
-                    await publisher.publish_and_confirm(job)
+                    publish_outcome = await publisher.publish_and_confirm(job)
+                    if publish_outcome == "waiting_manual_confirm":
+                        job.publish_phase = "waiting_manual_confirm"
+                        job.status = "waiting_manual_confirm"
+                        job.error_code = None
+                        job.error_summary = None
+                        await self._record_platform_finish(
+                            session, platform_name, job.id
+                        )
+                        await session.commit()
+                        return
                     job.publish_phase = "publish_clicked"
                     await session.commit()
 
@@ -413,8 +508,8 @@ class SerialWorker:
                     await session.commit()
                     return
 
-                # 4. Fresh execution: editing -> draft_saved -> publish
-                job.publish_phase = "editing"
+                # 4. Fresh execution: API creation or browser editing -> draft_saved -> publish
+                job.publish_phase = publisher.draft_creation_phase
                 await session.commit()
 
                 draft_url, draft_id = await publisher.save_draft(job, media_paths)
@@ -431,13 +526,23 @@ class SerialWorker:
                     return
 
                 # mode == "publish"
-                if job.final_url and job.platform != "xiaohongshu":
-                    await publisher.open_draft(job.final_url)
+                if (job.final_url or job.platform_draft_id) and job.platform != "xiaohongshu":
+                    await publisher.open_draft(job.final_url, job=job)
 
                 job.publish_phase = "publish_intent"
                 await session.commit()
 
-                await publisher.publish_and_confirm(job)
+                publish_outcome = await publisher.publish_and_confirm(job)
+                if publish_outcome == "waiting_manual_confirm":
+                    job.publish_phase = "waiting_manual_confirm"
+                    job.status = "waiting_manual_confirm"
+                    job.error_code = None
+                    job.error_summary = None
+                    await self._record_platform_finish(
+                        session, platform_name, job.id
+                    )
+                    await session.commit()
+                    return
                 job.publish_phase = "publish_clicked"
                 await session.commit()
 
@@ -450,7 +555,10 @@ class SerialWorker:
                 else:
                     job.status = "publish_unknown"
                     job.error_code = "PUBLISH_RESULT_UNKNOWN"
-                    job.error_summary = "Publish confirmed but public URL could not be retrieved immediately"
+                    job.error_summary = (
+                        "Publish confirmed but public URL could not be retrieved "
+                        "immediately"
+                    )
                     job.finished_at = datetime.now(UTC)
                     await self._record_platform_finish(session, platform_name, job.id)
                     await emit_notify_hub_alert(
@@ -566,10 +674,67 @@ class SerialWorker:
         non_retryable = {
             "CONTENT_REJECTED",
             "PUBLISH_QUOTA_EXHAUSTED",
+            "DRAFT_OPEN_FAILED",
+            "PUBLISH_NOT_STARTED",
             "PUBLISH_CONFIRM_FAILED",
             "PROVIDER_UI_CHANGED",
+            "DRAFT_API_RESULT_UNKNOWN",
+            "DRAFT_API_REJECTED",
         }
-        # Once publish_intent or publish_clicked, switch to reconciling instead of aborting without check
+        if job.publish_phase == "waiting_manual_confirm":
+            # Reconciliation errors while waiting for the administrator are
+            # safe to retry; never return to the publish click path.
+            job.status = "waiting_manual_confirm"
+            await self._record_platform_finish(session, platform_name, job.id)
+            await session.commit()
+            return
+        if err_code == "PUBLISH_NOT_STARTED":
+            # No publish action was clicked.  Keep the saved-draft checkpoint
+            # and report a real failure instead of entering post-click
+            # reconciliation, which is reserved for an ambiguous click.
+            job.publish_phase = "draft_saved"
+            job.status = "failed"
+            job.finished_at = datetime.now(UTC)
+            await emit_notify_hub_alert(
+                self.settings,
+                event_type="publisher.job.failed",
+                event_key=f"job-failed-{job.id}",
+                title=f"【{platform_name}】发表动作未开始",
+                content=(
+                    f"任务 {job.id} 标题《{job.content.get('title')}》尚未点击发表。\n"
+                    f"错误信息：{err_msg}\n控制台：{self.settings.console_public_url}"
+                ),
+                level="warning",
+                payload={"job_id": job.id, "error_code": err_code},
+            )
+            await self._record_platform_finish(session, platform_name, job.id)
+            await session.commit()
+            return
+        if job.publish_phase == "api_creating_draft":
+            if err_code == "DRAFT_API_RESULT_UNKNOWN":
+                job.status = "failed"
+                job.finished_at = datetime.now(UTC)
+                await emit_notify_hub_alert(
+                    self.settings,
+                    event_type="publisher.job.draft_unknown",
+                    event_key=f"job-draft-unknown-{job.id}",
+                    title=f"【{platform_name}】草稿创建结果未知",
+                    content=(
+                        f"任务 {job.id} 标题《{job.content.get('title')}》调用微信官方 API 后未收到确定响应，"
+                        "为避免重复创建草稿，系统不会自动重试。请在公众号草稿箱核对。"
+                        f"控制台：{self.settings.console_public_url}"
+                    ),
+                    level="critical",
+                    payload={"job_id": job.id, "platform": platform_name},
+                )
+                await self._record_platform_finish(session, platform_name, job.id)
+                await session.commit()
+                return
+            # A provider rejection happened before draft/add was accepted, so
+            # it is safe to retry according to the normal attempt budget.
+            job.publish_phase = None
+        # Once publish_intent or publish_clicked, switch to reconciling instead
+        # of aborting without a check.
         if job.publish_phase in ("publish_intent", "publish_clicked"):
             job.publish_phase = "reconciling"
             job.status = "queued"
@@ -662,7 +827,9 @@ class SerialWorker:
 
     async def _download_temp_media(self, url: str) -> Path | None:
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            # Notify Hub may expose media through an internal HTTPS endpoint
+            # with a locally managed certificate; preserve that compatibility.
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:  # noqa: S501
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     ext = ".jpg"

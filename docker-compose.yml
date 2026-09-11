@@ -9,6 +9,12 @@ services:
       PUBLISHER_DATA_DIR: /app/data
       PUBLISHER_HEADLESS: "true"
       PUBLISHER_WECHAT_MP_DEFAULT_MODE: "publish"
+      # Official WeChat MP API credentials belong to Browser Publisher.
+      # Leave them empty to use the legacy Playwright draft-editor fallback.
+      PUBLISHER_WECHAT_MP_APP_ID: "${PUBLISHER_WECHAT_MP_APP_ID:-}"
+      PUBLISHER_WECHAT_MP_APP_SECRET: "${PUBLISHER_WECHAT_MP_APP_SECRET:-}"
+      PUBLISHER_WECHAT_MP_API_BASE_URL: "${PUBLISHER_WECHAT_MP_API_BASE_URL:-https://api.weixin.qq.com}"
+      PUBLISHER_WECHAT_MP_AUTHOR: "${PUBLISHER_WECHAT_MP_AUTHOR:-Notify Hub}"
       PUBLISHER_XHS_DEFAULT_MODE: "draft"
       PUBLISHER_XHS_MIN_INTERVAL_SECONDS: "1800"
       PUBLISHER_CONSOLE_PUBLIC_URL: "${PUBLISHER_CONSOLE_PUBLIC_URL:-http://192.168.31.100:8790}"

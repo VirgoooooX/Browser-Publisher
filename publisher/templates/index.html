@@ -181,7 +181,7 @@
               </td>
               <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
               <td>
-                {% if job.status in ['queued', 'running'] %}
+                {% if job.status in ['queued', 'running', 'waiting_manual_confirm'] %}
                 <button class="btn btn-danger btn-sm" onclick="cancelJob('{{ job.id }}')">取消</button>
                 {% else %}
                 -
@@ -402,7 +402,7 @@
         const linkOrErr = job.final_url
           ? `<a href="${job.final_url}" target="_blank" style="color: var(--accent-primary);">打开链接</a>`
           : (job.error_code ? `<span style="color: var(--danger);">${job.error_code}</span>` : '-');
-        const cancelBtn = (job.status === 'queued' || job.status === 'waiting_auth')
+        const cancelBtn = (job.status === 'queued' || job.status === 'waiting_auth' || job.status === 'waiting_manual_confirm')
           ? `<button class="btn btn-danger btn-sm" onclick="cancelJob('${job.id}')">取消</button>`
           : '-';
         tr.innerHTML = `

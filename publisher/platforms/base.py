@@ -41,22 +41,30 @@ class BasePlatformPublisher(ABC):
         self,
         job: PublishJob,
         media_paths: list[Path],
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str | None, str | None]:
         """Fill content, upload media, save draft, and return (draft_url, platform_draft_id)."""
 
+    @property
+    def draft_creation_phase(self) -> str:
+        """Return the durable phase used while creating a fresh draft."""
+
+        return "editing"
+
     @abstractmethod
-    async def open_draft(self, draft_url: str) -> None:
+    async def open_draft(
+        self, draft_url: str | None, *, job: PublishJob | None = None
+    ) -> None:
         """Open an existing saved draft by URL."""
 
     @abstractmethod
-    async def publish_and_confirm(self, job: PublishJob) -> None:
-        """Click the publish button and confirm final publication modal."""
+    async def publish_and_confirm(self, job: PublishJob) -> str | None:
+        """Click publish and return ``waiting_manual_confirm`` if needed."""
 
     @abstractmethod
     async def verify_published(
         self, job: PublishJob, start_time: datetime
     ) -> str | None:
-        """Verify publication success right after publish click and return public article/note URL."""
+        """Verify publication success after publish click and return its URL."""
 
     @abstractmethod
     async def reconcile(self, job: PublishJob, start_time: datetime) -> str | None:

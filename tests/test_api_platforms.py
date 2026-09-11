@@ -28,3 +28,26 @@ async def test_platform_resume(client: AsyncClient) -> None:
     resume_resp = await client.post("/v1/platforms/xiaohongshu/resume")
     assert resume_resp.status_code == 200
     assert resume_resp.json()["status"] == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_platform_reauth_starts_a_new_alert_incident(
+    client: AsyncClient,
+    test_db: tuple[object, object],
+) -> None:
+    _engine, session_factory = test_db
+    from publisher.models import PlatformState
+
+    async with session_factory() as session:
+        state = await session.get(PlatformState, "wechat_mp")
+        assert state is not None
+        state.alert_incident_id = "old-incident"
+        await session.commit()
+
+    resp = await client.post("/v1/platforms/wechat_mp/reauth")
+    assert resp.status_code == 200
+
+    async with session_factory() as session:
+        state = await session.get(PlatformState, "wechat_mp")
+        assert state is not None
+        assert state.alert_incident_id is None

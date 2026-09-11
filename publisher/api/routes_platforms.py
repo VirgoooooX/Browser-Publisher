@@ -94,6 +94,9 @@ async def request_platform_login(
                 .values(
                     session_state="auth_required",
                     qr_code_base64=qr_b64,
+                    alert_incident_id=None,
+                    last_error_code=None,
+                    last_error_message=None,
                     updated_at=utc_now(),
                 )
             )
@@ -166,6 +169,9 @@ async def reauth_platform(
                 .values(
                     session_state="auth_required",
                     qr_code_base64=qr_b64,
+                    alert_incident_id=None,
+                    last_error_code=None,
+                    last_error_message=None,
                     updated_at=utc_now(),
                 )
             )

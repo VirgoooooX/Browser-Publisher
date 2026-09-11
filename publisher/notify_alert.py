@@ -26,6 +26,12 @@ async def emit_notify_hub_alert(
 ) -> bool:
     """Send an alert event to Notify Hub external event API if configured."""
     if not settings.notify_event_url or not settings.notify_api_key:
+        logger.warning(
+            "notify_hub_alert_skipped_not_configured",
+            event_url_configured=bool(settings.notify_event_url),
+            api_key_configured=bool(settings.notify_api_key),
+            event_type=event_type,
+        )
         return False
 
     url = str(settings.notify_event_url).rstrip("/")
@@ -101,4 +107,3 @@ async def emit_notify_hub_alert(
     except Exception as exc:
         logger.warning("notify_hub_alert_exception", error=str(exc))
     return False
-

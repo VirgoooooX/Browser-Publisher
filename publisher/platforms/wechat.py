@@ -9,20 +9,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunsplit
 
+import httpx
 import structlog
-
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob
 from publisher.platforms.base import BasePlatformPublisher
 from publisher.platforms.render import render_wechat_html
+from publisher.platforms.wechat_api import WeChatApiClient
 
 logger = structlog.get_logger()
 
 # Selectors and constants
 MP_ORIGIN = "https://mp.weixin.qq.com"
 MP_HOME_URL = f"{MP_ORIGIN}/"
+MP_DRAFT_LIST_URL_TEMPLATE = (
+    f"{MP_ORIGIN}/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=list"
+    "&begin=0&count=20&token={token}&lang=zh_CN"
+)
 QR_SELECTORS = [
     "img.js_login_qrcode",
     ".js_login_qrcode img",
@@ -39,19 +44,33 @@ CONFIRM_BUTTON_NAMES = [
 ]
 NO_DECLARATION_BUTTON_NAMES = ["无需声明并发表", "无需声明并群发"]
 DECLARATION_PROMPT_TEXT = "若你发表的内容涉及"
+GROUP_NOTIFICATION_LABEL_NAMES = ["群发通知", "发送群通知"]
+PUBLISH_ENTRY_BUTTON_NAMES = ["下一步", "发表", "群发"]
 
 
 class WeChatPublisher(BasePlatformPublisher):
-    """Automates article draft creation, cover selection, and publication on WeChat MP."""
+    """Create drafts through the official API and publish them through Playwright."""
 
     def __init__(
-        self, settings: PublisherSettings, browser_manager: Any = None
+        self,
+        settings: PublisherSettings,
+        browser_manager: Any = None,
+        wechat_api_client: WeChatApiClient | None = None,
     ) -> None:
         super().__init__(settings)
         self._browser_manager = browser_manager
+        self._wechat_api = wechat_api_client or (
+            WeChatApiClient(settings) if settings.wechat_mp_api_configured else None
+        )
         self._playwright: Any = None
         self._context: Any = None
         self._active_page: Any = None
+
+    @property
+    def draft_creation_phase(self) -> str:
+        """Use a separate checkpoint when the official API owns draft creation."""
+
+        return "api_creating_draft" if self._wechat_api is not None else "editing"
 
     async def get_context(self) -> Any:
         """Return the shared or dedicated browser context."""
@@ -88,26 +107,33 @@ class WeChatPublisher(BasePlatformPublisher):
 
     async def close(self) -> None:
         """Close browser context and stop Playwright if owned."""
-        if self._browser_manager is not None:
-            return
-
-        if self._context is not None:
-            try:
-                await self._context.close()
-            except Exception as exc:
-                logger.debug("wechat_browser_context_close_failed", error=str(exc))
-            self._context = None
-        if self._playwright is not None:
-            try:
-                await self._playwright.stop()
-            except Exception as exc:
-                logger.debug("wechat_playwright_stop_failed", error=str(exc))
-            self._playwright = None
-        self._active_page = None
+        if self._browser_manager is None:
+            if self._context is not None:
+                try:
+                    await self._context.close()
+                except Exception as exc:
+                    logger.debug("wechat_browser_context_close_failed", error=str(exc))
+                self._context = None
+            if self._playwright is not None:
+                try:
+                    await self._playwright.stop()
+                except Exception as exc:
+                    logger.debug("wechat_playwright_stop_failed", error=str(exc))
+                self._playwright = None
+            self._active_page = None
+        if self._wechat_api is not None:
+            await self._wechat_api.close()
 
     async def get_page(self) -> Any:
         if self._browser_manager is not None:
-            return await self._browser_manager.get_page()
+            if self._active_page is not None:
+                try:
+                    if not self._active_page.is_closed():
+                        return self._active_page
+                except Exception:
+                    self._active_page = None
+            self._active_page = await self._browser_manager.get_page()
+            return self._active_page
 
         if not self._context:
             raise RuntimeError("Playwright browser context is not initialized")
@@ -178,7 +204,7 @@ class WeChatPublisher(BasePlatformPublisher):
         return None
 
     async def clear_auth(self) -> None:
-        """Clear cookies for WeChat domain only and force navigation away from authenticated state."""
+        """Clear WeChat cookies and navigate away from authenticated state."""
         context = await self.get_context()
         if context:
             for domain in ["mp.weixin.qq.com", ".weixin.qq.com", ".qq.com"]:
@@ -215,6 +241,7 @@ class WeChatPublisher(BasePlatformPublisher):
                 await new_article_btn.first.click()
             editor_page = await page_info.value
             await editor_page.wait_for_load_state("domcontentloaded")
+            self._active_page = editor_page
             with contextlib.suppress(Exception):
                 conflict_btn = editor_page.locator(
                     "button:has-text('查看新草稿'), a:has-text('查看新草稿')"
@@ -385,20 +412,118 @@ class WeChatPublisher(BasePlatformPublisher):
                     await editor_target.fill(body_text)
             await asyncio.sleep(0.5)
 
-    async def select_cover_from_content(self, page: Any) -> None:
+    def _cover_url_for_editor(self, job: PublishJob) -> str | None:
+        """Prefer Notify Hub's internal origin for media when it is configured."""
+        cover_url = next(
+            (
+                str(item["url"])
+                for item in job.media
+                if item.get("kind") == "url" and item.get("url")
+            ),
+            None,
+        )
+        if not cover_url or not self.settings.notify_event_url:
+            return cover_url
+
+        source = urlsplit(cover_url)
+        notify_hub = urlsplit(str(self.settings.notify_event_url))
+        if not source.path or not notify_hub.scheme or not notify_hub.netloc:
+            return cover_url
+        return urlunsplit(
+            (notify_hub.scheme, notify_hub.netloc, source.path, source.query, "")
+        )
+
+    async def _download_cover_for_upload(self, job: PublishJob) -> Path | None:
+        cover_url = self._cover_url_for_editor(job)
+        if not cover_url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(cover_url)
+            content_type = response.headers.get("content-type", "").lower()
+            if response.status_code != 200 or not content_type.startswith("image/"):
+                logger.warning(
+                    "wechat_cover_download_failed",
+                    status_code=response.status_code,
+                    content_type=content_type,
+                )
+                return None
+            if not response.content or len(response.content) > 20 * 1024 * 1024:
+                logger.warning(
+                    "wechat_cover_download_invalid_size",
+                    size_bytes=len(response.content),
+                )
+                return None
+
+            suffix = Path(urlsplit(cover_url).path).suffix.lower()
+            if suffix not in {".gif", ".jpeg", ".jpg", ".png", ".webp"}:
+                suffix = ".png" if "png" in content_type else ".jpg"
+            self.settings.media_dir.mkdir(parents=True, exist_ok=True)
+            cover_path = self.settings.media_dir / f"wechat_cover_{job.id}{suffix}"
+            await asyncio.to_thread(cover_path.write_bytes, response.content)
+            return cover_path
+        except Exception as exc:
+            logger.warning("wechat_cover_download_exception", error=str(exc))
+            return None
+
+    async def _insert_cover_image(self, page: Any, cover_path: Path) -> bool:
+        if not await asyncio.to_thread(cover_path.is_file):
+            return False
+
+        editor = page.locator(
+            "#ueditor_0 .ProseMirror, .rich_media_content .ProseMirror, "
+            'div.ProseMirror:not([data-placeholder*="标题"]), '
+            "#js_editor_content, #js_editor"
+        ).first
+        upload_input = page.locator(
+            '#js_editor_insertimage input[type="file"], '
+            'input[type="file"][accept*="image"]'
+        ).first
+        if await editor.count() == 0 or await upload_input.count() == 0:
+            logger.warning("wechat_body_image_upload_control_not_found")
+            return False
+
+        uploaded_images = page.locator('img.js_insertlocalimg[data-upload="1"]')
+        before_count = await uploaded_images.count()
+        try:
+            picture_menu = page.locator("#js_editor_insertimage").first
+            if await picture_menu.count() > 0 and await picture_menu.is_visible():
+                await picture_menu.click()
+            await editor.click()
+            await page.keyboard.press("Control+Home")
+            await upload_input.set_input_files(str(cover_path))
+        except Exception as exc:
+            logger.warning("wechat_body_image_upload_failed", error=str(exc))
+            return False
+
+        deadline = asyncio.get_running_loop().time() + min(
+            self.settings.operation_timeout_seconds, 20
+        )
+        while asyncio.get_running_loop().time() < deadline:
+            if await uploaded_images.count() > before_count:
+                uploaded = uploaded_images.last
+                src = await uploaded.get_attribute("src")
+                if src and await uploaded.is_visible():
+                    logger.info("wechat_body_cover_uploaded")
+                    return True
+            await asyncio.sleep(0.5)
+        logger.warning("wechat_body_image_upload_timeout")
+        return False
+
+    async def select_cover_from_content(self, page: Any) -> bool:
         """Select first body image as article cover via '从正文选择'."""
         cover_btn = page.locator(
             ".select-cover__btn, #js_cover_area, .js_cover_btn_area, #js_cover_null"
         ).first
         if await cover_btn.count() == 0:
             logger.warning("cover_selection_button_not_found_skipping")
-            return
+            return False
         try:
             await cover_btn.click()
             await asyncio.sleep(1.0)
         except Exception as exc:
             logger.warning("click_cover_btn_failed", error=str(exc))
-            return
+            return False
 
         from_content_tab = page.locator(':has-text("从正文选择")').last
         if (
@@ -406,13 +531,13 @@ class WeChatPublisher(BasePlatformPublisher):
             or not await from_content_tab.is_visible()
         ):
             logger.warning("from_content_tab_not_found_skipping")
-            return
+            return False
         try:
             await from_content_tab.click()
             await asyncio.sleep(1.5)
         except Exception as exc:
             logger.warning("click_from_content_tab_failed", error=str(exc))
-            return
+            return False
 
         img_pick = page.locator(
             ".appmsg_content_img_item, .appmsg_content_img, "
@@ -427,7 +552,7 @@ class WeChatPublisher(BasePlatformPublisher):
             )
             if await close_btn.count() > 0 and await close_btn.is_visible():
                 await close_btn.first.click()
-            return
+            return False
         await img_pick.click()
         await asyncio.sleep(0.5)
 
@@ -436,7 +561,7 @@ class WeChatPublisher(BasePlatformPublisher):
         ).first
         if await next_btn.count() == 0 or not await next_btn.is_visible():
             logger.warning("cover_next_button_not_found_skipping")
-            return
+            return False
         await next_btn.click()
         await asyncio.sleep(1.0)
 
@@ -444,23 +569,39 @@ class WeChatPublisher(BasePlatformPublisher):
         crop_dialog = page.locator(
             '.weui-desktop-dialog:has-text("编辑封面"), .weui-desktop-dialog'
         ).first
-        for btn_name in ["确认", "完成", "确定"]:
-            confirm_btn = page.locator(
-                f'.weui-desktop-dialog:has-text("编辑封面") button:has-text("{btn_name}"), '
-                f'.weui-desktop-dialog:not([style*="display: none"]) button:has-text("{btn_name}")'
-            ).first
-            if await confirm_btn.count() > 0 and await confirm_btn.is_visible():
-                await confirm_btn.click()
-                dialog_confirmed = True
-                try:
-                    await crop_dialog.wait_for(state="hidden", timeout=5000)
-                except Exception as exc:
-                    logger.debug("crop_dialog_hide_wait_timeout", error=str(exc))
-                break
+        # The crop dialog may render its confirmation button asynchronously.
+        # Poll briefly, and only inspect visible buttons in the active dialog
+        # so a hidden stale dialog cannot mask the live confirmation button.
+        deadline = asyncio.get_running_loop().time() + min(
+            self.settings.operation_timeout_seconds, 8
+        )
+        while asyncio.get_running_loop().time() < deadline and not dialog_confirmed:
+            for btn_name in ["确认", "完成", "确定"]:
+                # WeChat renders the crop action buttons in a portal that is
+                # not always a descendant of the dialog element. Exact role
+                # matching still lets us restrict the click to a visible,
+                # actionable confirmation button.
+                confirm_btns = page.get_by_role("button", name=btn_name, exact=True)
+                for index in range(await confirm_btns.count()):
+                    confirm_btn = confirm_btns.nth(index)
+                    if await confirm_btn.is_visible():
+                        await confirm_btn.click()
+                        dialog_confirmed = True
+                        try:
+                            await crop_dialog.wait_for(state="hidden", timeout=5000)
+                        except Exception as exc:
+                            logger.debug(
+                                "crop_dialog_hide_wait_timeout", error=str(exc)
+                            )
+                        break
+                if dialog_confirmed:
+                    break
+            if not dialog_confirmed:
+                await asyncio.sleep(0.25)
 
         if not dialog_confirmed:
             logger.warning("cover_confirmation_button_not_found")
-            return
+            return False
 
         preview = page.locator(
             ".js_cover_preview_new, .js_cover_preview, "
@@ -470,6 +611,7 @@ class WeChatPublisher(BasePlatformPublisher):
             await preview.first.wait_for(state="visible", timeout=5000)
         except Exception as exc:
             logger.debug("cover_preview_wait_ignored", error=str(exc))
+        return True
 
     async def check_risk_control(self, page: Any) -> None:
         """Inspect page for explicit security verification or rate limit prompts."""
@@ -495,14 +637,57 @@ class WeChatPublisher(BasePlatformPublisher):
         self,
         job: PublishJob,
         media_paths: list[Path],
-    ) -> tuple[str, str | None]:
-        """Fill article, optionally pick cover, and save draft."""
+    ) -> tuple[str | None, str | None]:
+        """Create an API draft, or use the legacy browser editor when unconfigured."""
+        if self._wechat_api is not None:
+            temporary_cover_path: Path | None = None
+            try:
+                cover_path: Path | None = None
+                for path in media_paths:
+                    if await asyncio.to_thread(path.is_file):
+                        cover_path = path
+                        break
+                if cover_path is None:
+                    temporary_cover_path = await self._download_cover_for_upload(job)
+                    cover_path = temporary_cover_path
+                if cover_path is None:
+                    raise RuntimeError(
+                        "COVER_FAILED: Could not download the WeChat API cover image"
+                    )
+                draft_media_id = await self._wechat_api.create_draft(job, cover_path)
+                logger.info(
+                    "wechat_official_api_draft_created",
+                    job_id=job.id,
+                )
+                return None, draft_media_id
+            finally:
+                if temporary_cover_path is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            temporary_cover_path.unlink, missing_ok=True
+                        )
+
         page = await self.get_page()
         editor_page = await self.open_editor(page)
+        temporary_cover_path: Path | None = None
+        keep_editor_open = False
 
         try:
             await self.fill_article(editor_page, job)
-            await self.select_cover_from_content(editor_page)
+            cover_path = next((path for path in media_paths if path.is_file()), None)
+            if cover_path is None:
+                temporary_cover_path = await self._download_cover_for_upload(job)
+                cover_path = temporary_cover_path
+            if cover_path is None or not await self._insert_cover_image(
+                editor_page, cover_path
+            ):
+                raise RuntimeError(
+                    "COVER_FAILED: Could not upload the cover image into article content"
+                )
+            if not await self.select_cover_from_content(editor_page):
+                raise RuntimeError(
+                    "COVER_FAILED: Could not select a cover image from article content"
+                )
 
             # Click save draft
             save_btn = editor_page.get_by_role("button", name="保存为草稿")
@@ -578,34 +763,250 @@ class WeChatPublisher(BasePlatformPublisher):
                     "DRAFT_SAVE_FAILED: Save draft timed out without explicit confirmation"
                 )
 
+            keep_editor_open = job.mode == "publish"
             return draft_url, draft_media_id
         finally:
-            if editor_page != page:
+            if temporary_cover_path is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        temporary_cover_path.unlink, missing_ok=True
+                    )
+            if editor_page != page and not keep_editor_open:
                 with contextlib.suppress(Exception):
                     await editor_page.close()
+                if self._active_page == editor_page:
+                    self._active_page = None
 
-    async def open_draft(self, draft_url: str) -> None:
-        """Open previously saved draft by URL with domain validation."""
-        parts = urlsplit(draft_url)
-        if parts.scheme != "https" or parts.netloc != "mp.weixin.qq.com":
-            raise ValueError(
-                f"DRAFT_SAVE_FAILED: Invalid draft URL domain: {draft_url}"
-            )
-        page = await self.get_page()
+    @staticmethod
+    def _is_api_draft_reference(
+        draft_url: str | None, job: PublishJob | None
+    ) -> bool:
+        """Return whether the job carries an official API draft id.
+
+        Official API ``media_id`` values are opaque strings and are not the
+        numeric ``appmsgid`` used by the MP web editor.  New API-created jobs
+        have no editor URL; the compatibility check also recognizes the
+        synthetic URL used by older queued test jobs.
+        """
+        if job is None or not job.platform_draft_id:
+            return False
+        if not draft_url:
+            return True
+        appmsgid = parse_qs(urlsplit(draft_url).query).get("appmsgid", [None])[0]
+        if appmsgid != job.platform_draft_id:
+            return False
+        return not appmsgid.isdigit() or len(appmsgid) > 32
+
+    @staticmethod
+    def _page_token(page: Any) -> str | None:
+        url = getattr(page, "url", "")
+        if not isinstance(url, str) or not url:
+            return None
+        return parse_qs(urlsplit(url).query).get("token", [None])[0]
+
+    async def _ensure_page_token(self, page: Any) -> str:
+        token = self._page_token(page)
+        if token:
+            return token
         await page.goto(
-            draft_url,
+            MP_HOME_URL,
             timeout=int(self.settings.navigation_timeout_seconds * 1000),
             wait_until="domcontentloaded",
         )
-        with contextlib.suppress(Exception):
-            conflict_btn = page.locator(
-                "button:has-text('查看新草稿'), a:has-text('查看新草稿')"
-            ).first
-            if await conflict_btn.count() > 0 and await conflict_btn.is_visible():
-                logger.info("wechat_draft_conflict_detected_clicking_new_draft")
-                await conflict_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(1.0)
+        token = self._page_token(page)
+        if not token:
+            raise RuntimeError(
+                "AUTH_REQUIRED: WeChat session token unavailable while opening draft"
+            )
+        return token
+
+    async def _find_publish_entry(self, page: Any) -> tuple[Any | None, str]:
+        """Find the editor entry action without clicking it."""
+        for selector in ("button.mass_send", ".mass_send", '[role="button"].mass_send'):
+            mass_send_btn = page.locator(selector)
+            for index in range(await mass_send_btn.count()):
+                candidate = (
+                    mass_send_btn.first if index == 0 else mass_send_btn.nth(index)
+                )
+                if not await candidate.is_visible():
+                    continue
+                try:
+                    return candidate, (await candidate.inner_text()).strip()
+                except Exception:
+                    return candidate, ""
+
+        for name in PUBLISH_ENTRY_BUTTON_NAMES:
+            candidate = page.get_by_role("button", name=name, exact=True)
+            for index in range(await candidate.count()):
+                visible_candidate = (
+                    candidate.first if index == 0 else candidate.nth(index)
+                )
+                if await visible_candidate.is_visible():
+                    return visible_candidate, name
+
+        # Some MP editor builds style the action as an anchor or a div instead
+        # of a semantic button.  Reuse the broader modal/button selectors used
+        # for the later confirmation step before declaring that no click can
+        # be started.
+        candidate = await self._visible_button(page, PUBLISH_ENTRY_BUTTON_NAMES)
+        if candidate is not None:
+            try:
+                return candidate, (await candidate.inner_text()).strip()
+            except Exception:
+                return candidate, ""
+        return None, ""
+
+    async def _editor_is_ready(self, page: Any, *, timeout_seconds: float = 8.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            entry, _ = await self._find_publish_entry(page)
+            if entry is not None:
+                return True
+            await asyncio.sleep(0.25)
+        return False
+
+    async def _open_api_draft(self, page: Any, job: PublishJob) -> None:
+        """Open an API-created draft from the MP draft list by its title."""
+        title = str((job.content or {}).get("title") or "").strip()
+        if not title:
+            raise RuntimeError(
+                "DRAFT_OPEN_FAILED: API-created WeChat draft title is unavailable"
+            )
+
+        token = await self._ensure_page_token(page)
+        draft_list_url = MP_DRAFT_LIST_URL_TEMPLATE.format(token=quote(token, safe=""))
+        normalized_title = " ".join(title.replace("\u00a0", " ").split())
+        deadline = asyncio.get_running_loop().time() + min(
+            max(float(self.settings.operation_timeout_seconds), 5.0), 30.0
+        )
+        while True:
+            await page.goto(
+                draft_list_url,
+                timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                wait_until="domcontentloaded",
+            )
+            await asyncio.sleep(0.5)
+
+            if "login" in str(getattr(page, "url", "")).lower():
+                raise RuntimeError(
+                    "AUTH_REQUIRED: WeChat session expired while opening API-created draft"
+                )
+
+            candidate_locators = [
+                page.locator(".appmsg_item"),
+                page.locator(".appmsg_title"),
+                page.locator(".weui-desktop-list__item"),
+                page.locator('a[href*="appmsg_edit"]'),
+                page.get_by_text(title, exact=False),
+            ]
+
+            for candidates in candidate_locators:
+                with contextlib.suppress(Exception):
+                    for index in range(await candidates.count()):
+                        candidate = candidates.nth(index)
+                        if not await candidate.is_visible():
+                            continue
+                        candidate_text = " ".join(
+                            (await candidate.inner_text()).replace("\u00a0", " ").split()
+                        )
+                        if normalized_title not in candidate_text:
+                            continue
+
+                        href = await candidate.get_attribute("href")
+                        if href:
+                            target_url = urljoin(MP_ORIGIN + "/", href)
+                            target_parts = urlsplit(target_url)
+                            if target_parts.netloc != "mp.weixin.qq.com":
+                                continue
+                            target_query = parse_qs(
+                                target_parts.query, keep_blank_values=True
+                            )
+                            # The link may carry the list page's stale token.
+                            # Always use the current authenticated session token.
+                            target_query["token"] = [token]
+                            target_url = urlunsplit(
+                                (
+                                    target_parts.scheme,
+                                    target_parts.netloc,
+                                    target_parts.path,
+                                    urlencode(target_query, doseq=True),
+                                    target_parts.fragment,
+                                )
+                            )
+                            await page.goto(
+                                target_url,
+                                timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                                wait_until="domcontentloaded",
+                            )
+                        else:
+                            await candidate.click(force=True)
+                            with contextlib.suppress(Exception):
+                                await page.wait_for_load_state("domcontentloaded")
+
+                        if await self._editor_is_ready(page):
+                            logger.info("wechat_api_draft_opened_by_title")
+                            return
+
+                        # Some list versions open a small action menu first.
+                        edit_btn = page.get_by_text("编辑", exact=True)
+                        if await edit_btn.count() > 0 and await edit_btn.first.is_visible():
+                            await edit_btn.first.click(force=True)
+                            with contextlib.suppress(Exception):
+                                await page.wait_for_load_state("domcontentloaded")
+                            if await self._editor_is_ready(page):
+                                logger.info("wechat_api_draft_opened_by_title")
+                                return
+
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(1.0, remaining))
+
+        raise RuntimeError(
+            "DRAFT_OPEN_FAILED: API-created WeChat draft was not found in the draft list"
+        )
+
+    async def open_draft(
+        self, draft_url: str | None, *, job: PublishJob | None = None
+    ) -> None:
+        """Open a saved browser draft or an official-API draft."""
+        page = await self.get_page()
+
+        if self._is_api_draft_reference(draft_url, job):
+            if job is None:
+                raise RuntimeError("DRAFT_OPEN_FAILED: API draft job context is unavailable")
+            await self._open_api_draft(page, job)
+            return
+
+        if not draft_url:
+            raise ValueError("DRAFT_OPEN_FAILED: Saved draft URL is unavailable")
+        parts = urlsplit(draft_url)
+        if parts.scheme != "https" or parts.netloc != "mp.weixin.qq.com":
+            raise ValueError(
+                f"DRAFT_OPEN_FAILED: Invalid draft URL domain: {draft_url}"
+            )
+        if page.url == draft_url:
+            logger.info("wechat_reusing_open_draft_editor")
+        else:
+            await page.goto(
+                draft_url,
+                timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                wait_until="domcontentloaded",
+            )
+            with contextlib.suppress(Exception):
+                conflict_btn = page.locator(
+                    "button:has-text('查看新草稿'), a:has-text('查看新草稿')"
+                ).first
+                if await conflict_btn.count() > 0 and await conflict_btn.is_visible():
+                    logger.info("wechat_draft_conflict_detected_clicking_new_draft")
+                    await conflict_btn.click()
+                    await page.wait_for_load_state("domcontentloaded")
+                    await asyncio.sleep(1.0)
+
+        if job is not None and not await self._editor_is_ready(page):
+            raise RuntimeError(
+                "DRAFT_OPEN_FAILED: WeChat draft editor did not expose a publish action"
+            )
 
     @staticmethod
     async def _visible_button(page: Any, names: list[str]) -> Any | None:
@@ -636,28 +1037,55 @@ class WeChatPublisher(BasePlatformPublisher):
 
     @staticmethod
     async def _disable_group_notification(page: Any) -> None:
-        label = page.get_by_text("群发通知", exact=True)
-        if await label.count() == 0 or not await label.first.is_visible():
-            return
-
-        row = label.first.locator(
-            "xpath=ancestor::*[.//input[@type='checkbox'] or .//*[@role='switch'] "
-            "or .//*[contains(@class,'switch')]][1]"
+        enabled_selectors = (
+            'input[type="checkbox"]:checked',
+            '[role="switch"][aria-checked="true"]',
+            '[class*="switch"][class~="checked"]',
+            '[class*="switch"][class*="is-checked"]',
+            '[class*="switch"][class*="switch_on"]',
+            '[class*="switch"][class*="switch--on"]',
+            '[class*="switch"][class*="--on"]',
         )
-        enabled_switch = row.locator(
-            'input[type="checkbox"]:checked, '
-            '[role="switch"][aria-checked="true"], '
-            '[class*="switch"][class~="checked"], '
-            '[class*="switch"][class*="is-checked"], '
-            '[class*="switch"][class*="switch_on"], '
-            '[class*="switch"][class*="switch--on"]'
-        ).first
-        if await enabled_switch.count() > 0:
-            await enabled_switch.click(force=True)
-            logger.info("wechat_group_notification_disabled")
+
+        for label_name in GROUP_NOTIFICATION_LABEL_NAMES:
+            label = page.get_by_text(label_name, exact=True)
+            if await label.count() == 0 or not await label.first.is_visible():
+                continue
+
+            rows = [
+                label.first.locator(
+                    "xpath=ancestor::*[.//input[@type='checkbox'] or .//*[@role='switch'] "
+                    "or .//*[contains(@class,'switch')]][1]"
+                ),
+                label.first.locator("xpath=.."),
+                label.first,
+            ]
+            for row in rows:
+                for selector in enabled_selectors:
+                    enabled_switch = row.locator(selector).first
+                    if await enabled_switch.count() == 0:
+                        continue
+                    try:
+                        if not await enabled_switch.is_visible():
+                            continue
+                    except Exception as exc:
+                        # Lightweight test doubles and a few custom controls
+                        # do not expose visibility; the checked selector is
+                        # already sufficient to make the click safe.
+                        logger.debug(
+                            "wechat_group_notification_visibility_check_failed",
+                            error=str(exc),
+                        )
+                    await enabled_switch.click(force=True)
+                    logger.info("wechat_group_notification_disabled", label=label_name)
+                    return
+
+            # The first text alias can be a static label while the actual
+            # switch is exposed under the second alias in newer editor builds.
+            # Keep looking rather than assuming the option was disabled.
 
     async def _handle_admin_verification(self, page: Any, job: PublishJob) -> bool:
-        """Check if WeChat admin QR verification modal is presented and handle it."""
+        """Detect an admin verification prompt and notify without capturing it."""
         frames = getattr(page, "frames", [])
         verify_frame = None
         if isinstance(frames, list):
@@ -667,124 +1095,97 @@ class WeChatPublisher(BasePlatformPublisher):
                     verify_frame = f
                     break
 
+        # Some MP editor versions render the verification view in the main
+        # document (or an iframe URL without a stable keyword), so URL-only
+        # detection misses the verification prompt. Inspect visible text as a fallback.
+        if verify_frame is None and isinstance(frames, list):
+            for frame in frames:
+                try:
+                    frame_text = await frame.locator("body").inner_text()
+                except Exception as exc:
+                    logger.debug(
+                        "wechat_verification_frame_text_failed", error=str(exc)
+                    )
+                    continue
+                if "微信验证" in frame_text and "扫码" in frame_text:
+                    verify_frame = frame
+                    break
+
         is_dialog_visible = False
-        verify_dialog = None
         with contextlib.suppress(Exception):
             dialog_loc = page.locator(
-                ".weui-desktop-dialog:has-text('微信验证'), .weui-desktop-dialog:has-text('管理员微信号')"
+                ".weui-desktop-dialog:has-text('微信验证'), "
+                ".weui-desktop-dialog:has-text('管理员微信号')"
             )
-            if hasattr(dialog_loc, "count"):
-                if await dialog_loc.count() > 0 and await dialog_loc.first.is_visible():
-                    dialog_text = await dialog_loc.first.inner_text()
-                    if "微信验证" in dialog_text or "管理员" in dialog_text:
-                        is_dialog_visible = True
-                        verify_dialog = dialog_loc.first
+            if (
+                hasattr(dialog_loc, "count")
+                and await dialog_loc.count() > 0
+                and await dialog_loc.first.is_visible()
+            ):
+                dialog_text = await dialog_loc.first.inner_text()
+                if "微信验证" in dialog_text or "管理员" in dialog_text:
+                    is_dialog_visible = True
+
+        # Newer pages use a portal wrapper instead of the legacy dialog class.
+        # The visible body text is a reliable fallback when no stable wrapper
+        # can be selected.
+        if not is_dialog_visible and verify_frame is None:
+            with contextlib.suppress(Exception):
+                body_text = await page.inner_text("body")
+                if "微信验证" in body_text and "扫码" in body_text:
+                    is_dialog_visible = True
 
         if not is_dialog_visible and verify_frame is None:
             return False
 
-        logger.info("wechat_admin_verify_modal_detected")
-        qr_file = self.settings.artifacts_dir / f"wechat_verify_{job.id}.png"
-        self.settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-        captured = False
-        if verify_frame is not None:
-            with contextlib.suppress(Exception):
-                qr_img = verify_frame.locator("img").first
-                if await qr_img.count() > 0:
-                    await qr_img.screenshot(path=str(qr_file))
-                    captured = True
-
-        if not captured and is_dialog_visible and verify_dialog is not None:
-            with contextlib.suppress(Exception):
-                await verify_dialog.screenshot(path=str(qr_file))
-                captured = True
-
-        if not captured:
-            with contextlib.suppress(Exception):
-                await page.screenshot(path=str(qr_file))
-                captured = True
-
+        logger.info("wechat_admin_verification_required")
         article_title = (job.content or {}).get("title", "") or str(job.id)
-        alert_title = "【微信公众号发布验证】请管理员扫码"
+        alert_title = "【微信公众号发布】需要人工确认"
         alert_content = (
-            f"文章《{article_title}》发布需要微信安全验证。\n"
-            f"请在3分钟内使用微信长按识别或扫描二维码完成确认。"
+            f"文章《{article_title}》已经提交发表，微信要求管理员人工确认。\n"
+            "请在微信或公众号后台完成确认，系统会自动核对发表结果。\n"
+            f"任务 ID：{job.id}\n控制台：{self.settings.console_public_url}"
         )
         from publisher.notify_alert import emit_notify_hub_alert
 
         await emit_notify_hub_alert(
             self.settings,
-            event_type="publisher.wechat.verify_qr",
-            event_key=f"wechat_verify_{job.id}_{int(time.time())}",
+            event_type="publisher.wechat.manual_confirm",
+            event_key=f"wechat_manual_confirm_{job.id}",
             title=alert_title,
             content=alert_content,
             level="warning",
             payload={"job_id": job.id, "platform": "wechat_mp"},
-            image_path=qr_file if captured else None,
         )
-
-        # Wait up to 180s for user to scan
-        scan_deadline = asyncio.get_running_loop().time() + 180.0
-        scan_confirmed = False
-        while asyncio.get_running_loop().time() < scan_deadline:
-            if hasattr(page, "is_closed") and page.is_closed():
-                scan_confirmed = True
-                break
-            try:
-                if verify_dialog is not None:
-                    if await verify_dialog.count() == 0 or not await verify_dialog.is_visible():
-                        scan_confirmed = True
-                        break
-                body_text = await page.inner_text("body")
-                if any(k in body_text for k in ["已发表", "发表成功", "群发已提交", "已群发", "发布成功"]):
-                    scan_confirmed = True
-                    break
-            except Exception:
-                scan_confirmed = True
-                break
-            await asyncio.sleep(2.0)
-
-        if not scan_confirmed:
-            raise RuntimeError(
-                "PUBLISH_CONFIRM_FAILED: WeChat admin verification QR code scan timed out after 180s"
-            )
-
-        logger.info("wechat_admin_verify_scan_confirmed")
         return True
 
-    async def publish_and_confirm(self, job: PublishJob) -> None:
+    async def _wait_for_admin_verification(
+        self,
+        page: Any,
+        job: PublishJob,
+        *,
+        timeout_seconds: float = 8.0,
+    ) -> bool:
+        """Allow the verification dialog time to appear after the final click."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if await self._handle_admin_verification(page, job):
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
+    async def publish_and_confirm(self, job: PublishJob) -> str | None:
         """Enter the publish flow and confirm the final publish action."""
         page = await self.get_page()
         await self.check_risk_control(page)
 
-        mass_send_btn = page.locator("button.mass_send")
-        entry_name = ""
-        if (
-            await mass_send_btn.count() == 0
-            or not await mass_send_btn.first.is_visible()
-        ):
-            for name in ["下一步", "发表", "群发"]:
-                candidate = page.get_by_role("button", name=name, exact=True)
-                if await candidate.count() > 0 and await candidate.first.is_visible():
-                    mass_send_btn = candidate
-                    entry_name = name
-                    break
-        if (
-            await mass_send_btn.count() == 0
-            or not await mass_send_btn.first.is_visible()
-        ):
+        mass_send_btn, entry_name = await self._find_publish_entry(page)
+        if mass_send_btn is None:
             raise RuntimeError(
-                "PUBLISH_CONFIRM_FAILED: Publish / mass_send button not found"
+                "PUBLISH_NOT_STARTED: WeChat publish entry button not found"
             )
 
-        if not entry_name:
-            try:
-                entry_name = (await mass_send_btn.first.inner_text()).strip()
-            except Exception:
-                entry_name = ""
-
-        await mass_send_btn.first.click()
+        await mass_send_btn.click()
         await asyncio.sleep(0.5)
         next_step_clicked = entry_name == "下一步"
         ai_declaration_clicked = False
@@ -798,17 +1199,29 @@ class WeChatPublisher(BasePlatformPublisher):
         while asyncio.get_running_loop().time() < deadline:
             await self.check_risk_control(page)
 
+            for validation_text in [
+                "标题不能为空且长度不能超过64字",
+                "必须插入一张图片",
+            ]:
+                validation_error = page.get_by_text(validation_text, exact=False)
+                if (
+                    await validation_error.count() > 0
+                    and await validation_error.first.is_visible()
+                ):
+                    raise RuntimeError(
+                        f"PUBLISH_CONFIRM_FAILED: Editor validation failed: {validation_text}"
+                    )
+
             if await self._handle_admin_verification(page, job):
-                return
+                return "waiting_manual_confirm"
 
             no_declaration_btn = await self._visible_button(
                 page, NO_DECLARATION_BUTTON_NAMES
             )
             if no_declaration_btn is not None:
                 await no_declaration_btn.click()
-                await asyncio.sleep(1.0)
-                if await self._handle_admin_verification(page, job):
-                    return
+                if await self._wait_for_admin_verification(page, job):
+                    return "waiting_manual_confirm"
                 return
 
             declaration_prompt = page.get_by_text(DECLARATION_PROMPT_TEXT, exact=False)
@@ -836,9 +1249,23 @@ class WeChatPublisher(BasePlatformPublisher):
                     await confirm_btn.click()
                     publish_action_clicked = True
                     publish_action_clicked_at = asyncio.get_running_loop().time()
-                    await asyncio.sleep(1.0)
-                    if await self._handle_admin_verification(page, job):
-                        return
+                    if await self._wait_for_admin_verification(page, job):
+                        return "waiting_manual_confirm"
+                    continue
+
+            # WeChat may show a second confirmation dialog after the publish
+            # settings dialog (for example, “继续发表” after enabling group
+            # notifications). Handle that visible follow-up exactly once
+            # before considering the publish action complete.
+            if publish_action_clicked:
+                follow_up_btn = await self._visible_button(
+                    page, ["继续发表", "继续群发", "确认", "确定"]
+                )
+                if follow_up_btn is not None:
+                    await follow_up_btn.click()
+                    publish_action_clicked_at = asyncio.get_running_loop().time()
+                    if await self._wait_for_admin_verification(page, job):
+                        return "waiting_manual_confirm"
                     continue
 
             # Modern MP editor enters publish page via '下一步'
@@ -855,8 +1282,8 @@ class WeChatPublisher(BasePlatformPublisher):
                 and not declaration_prompt_seen
                 and asyncio.get_running_loop().time() - publish_action_clicked_at >= 2
             ):
-                if await self._handle_admin_verification(page, job):
-                    return
+                if await self._wait_for_admin_verification(page, job):
+                    return "waiting_manual_confirm"
                 # Older pages publish directly without the declaration prompt.
                 return
 
@@ -886,6 +1313,12 @@ class WeChatPublisher(BasePlatformPublisher):
             self._active_page = page
 
         title = (job.content or {}).get("title", "")
+
+        def normalize_title(value: object) -> str:
+            """Normalize browser-rendered whitespace before comparing titles."""
+            return " ".join(str(value or "").replace("\u00a0", " ").split())
+
+        normalized_title = normalize_title(title)
         token = None
         if "token=" in page.url:
             token = parse_qs(urlsplit(page.url).query).get("token", [None])[0]
@@ -934,9 +1367,13 @@ class WeChatPublisher(BasePlatformPublisher):
                         "els => els.map(e => ({text: e.innerText.trim(), href: e.href}))",
                     )
                     for item_info in links:
-                        item_text = item_info.get("text", "")
+                        item_text = normalize_title(item_info.get("text", ""))
                         item_href = item_info.get("href", "")
-                        if not title or title in item_text or item_text in title:
+                        if (
+                            not normalized_title
+                            or normalized_title in item_text
+                            or item_text in normalized_title
+                        ):
                             if item_href.startswith("/s/"):
                                 return f"{MP_ORIGIN}{item_href}"
                             if item_href.startswith("https://mp.weixin.qq.com/s/"):
@@ -963,4 +1400,3 @@ class WeChatPublisher(BasePlatformPublisher):
                 logger.debug("reconcile_check_error", error=str(exc))
             await asyncio.sleep(5.0)
         return None
-
