@@ -131,7 +131,9 @@ class PublisherSettings(BaseSettings):
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("WeChat MP API base URL must not include credentials")
         if parsed.query or parsed.fragment:
-            raise ValueError("WeChat MP API base URL must not include a query or fragment")
+            raise ValueError(
+                "WeChat MP API base URL must not include a query or fragment"
+            )
         # Keep a trailing slash so httpx preserves a reverse-proxy path prefix
         # when joining relative endpoint paths such as ``cgi-bin/token``.
         return value.rstrip("/") + "/"

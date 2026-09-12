@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +21,9 @@ logger = structlog.get_logger()
 
 TOKEN_INVALID_CODES = {40001, 42001}
 RETRYABLE_CODES = {-1, 45009}
+MAX_ARTICLE_IMAGE_BYTES = 1 * 1024 * 1024
+ARTICLE_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+PUBLISHER_MEDIA_TOKEN_RE = re.compile(r"publisher-media://(?P<media_id>[A-Za-z0-9_-]+)")
 
 
 class WeChatApiError(RuntimeError):
@@ -45,7 +50,7 @@ class _TokenCache:
 
 
 class WeChatApiClient:
-    """Small async client for token, permanent image, and draft APIs."""
+    """Small async client for token, image, and draft APIs."""
 
     def __init__(
         self,
@@ -104,7 +109,9 @@ class WeChatApiClient:
                     retryable=True,
                 ) from exc
             except httpx.HTTPStatusError as exc:
-                retryable = exc.response.status_code >= 500 or exc.response.status_code == 429
+                retryable = (
+                    exc.response.status_code >= 500 or exc.response.status_code == 429
+                )
                 raise WeChatApiError(
                     0,
                     f"WeChat token HTTP error {exc.response.status_code}",
@@ -116,7 +123,9 @@ class WeChatApiClient:
             self._raise_for_api_error(data, operation="token")
             access_token = data.get("access_token")
             if not isinstance(access_token, str) or not access_token:
-                raise WeChatApiError(0, "WeChat token response did not contain access_token")
+                raise WeChatApiError(
+                    0, "WeChat token response did not contain access_token"
+                )
             self._cache = _TokenCache(
                 value=access_token,
                 expires_at=self._now()
@@ -137,6 +146,29 @@ class WeChatApiClient:
         if not isinstance(media_id, str) or not media_id:
             raise WeChatApiError(0, "WeChat API did not return an image media id")
         return media_id
+
+    async def upload_article_image(
+        self, *, filename: str, content_type: str, content: bytes
+    ) -> str:
+        """Upload an image and return the URL allowed inside article HTML."""
+        try:
+            data, _ = await self._request_json(
+                "POST",
+                "cgi-bin/media/uploadimg",
+                files={"media": (filename, content, content_type)},
+            )
+        except WeChatApiError as exc:
+            raise WeChatApiError(
+                exc.code,
+                f"INLINE_IMAGE_FAILED: {exc}",
+                retryable=exc.retryable,
+            ) from exc
+        image_url = data.get("url")
+        if not isinstance(image_url, str) or not image_url:
+            raise WeChatApiError(
+                0, "INLINE_IMAGE_FAILED: WeChat API did not return an image URL"
+            )
+        return image_url
 
     async def add_draft(self, articles: list[dict[str, Any]]) -> str:
         try:
@@ -167,8 +199,9 @@ class WeChatApiClient:
         self,
         job: PublishJob,
         cover_path: Path,
+        media_paths: list[Path] | None = None,
     ) -> str:
-        """Upload the cover and create the complete official API draft."""
+        """Upload images and create the complete official API draft."""
 
         if not await asyncio.to_thread(cover_path.is_file):
             raise RuntimeError("COVER_FAILED: WeChat API cover file is unavailable")
@@ -181,6 +214,9 @@ class WeChatApiClient:
                 source_url=job.source_url,
                 strip_title_heading=True,
             )
+        body_html = await self._replace_article_image_tokens(
+            body_html, media_paths or []
+        )
 
         image_bytes = await asyncio.to_thread(cover_path.read_bytes)
         if not image_bytes:
@@ -196,7 +232,7 @@ class WeChatApiClient:
         author = str(content.get("author") or self._settings.wechat_mp_author).strip()
         digest = str(content.get("digest") or "").strip()
         if not digest:
-            digest = " ".join(body_text.split())[:120]
+            digest = " ".join(PUBLISHER_MEDIA_TOKEN_RE.sub("", body_text).split())[:120]
         article: dict[str, Any] = {
             "title": title,
             "author": author,
@@ -209,6 +245,55 @@ class WeChatApiClient:
         if job.source_url:
             article["content_source_url"] = job.source_url
         return await self.add_draft([article])
+
+    async def _replace_article_image_tokens(
+        self, content: str, media_paths: list[Path]
+    ) -> str:
+        """Replace publisher media tokens with URLs accepted by WeChat."""
+        media_by_id = {
+            path.stem: path for path in media_paths if path.suffix and path.stem
+        }
+        replacements: dict[str, str] = {}
+        for match in PUBLISHER_MEDIA_TOKEN_RE.finditer(content):
+            media_id = match.group("media_id")
+            if media_id in replacements:
+                continue
+            image_path = media_by_id.get(media_id)
+            if image_path is None or not await asyncio.to_thread(image_path.is_file):
+                raise RuntimeError(
+                    f"INLINE_IMAGE_FAILED: Uploaded article image '{media_id}' is unavailable"
+                )
+            suffix = image_path.suffix.lower()
+            if suffix not in ARTICLE_IMAGE_SUFFIXES:
+                raise RuntimeError(
+                    "INLINE_IMAGE_FAILED: WeChat article images must be JPG or PNG"
+                )
+            try:
+                image_size = await asyncio.to_thread(image_path.stat)
+                if (
+                    image_size.st_size <= 0
+                    or image_size.st_size > MAX_ARTICLE_IMAGE_BYTES
+                ):
+                    raise RuntimeError(
+                        "INLINE_IMAGE_FAILED: Each WeChat article image must be non-empty and at most 1 MiB"
+                    )
+                image_bytes = await asyncio.to_thread(image_path.read_bytes)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"INLINE_IMAGE_FAILED: Could not read article image '{media_id}'"
+                ) from exc
+            replacements[media_id] = await self.upload_article_image(
+                filename=image_path.name,
+                content_type=_content_type_for_path(image_path),
+                content=image_bytes,
+            )
+
+        for media_id, image_url in replacements.items():
+            content = content.replace(
+                f"publisher-media://{media_id}",
+                html.escape(image_url, quote=True),
+            )
+        return content
 
     async def _request_json(
         self,
@@ -253,7 +338,9 @@ class WeChatApiClient:
         except (httpx.TimeoutException, httpx.NetworkError):
             raise
         except httpx.HTTPStatusError as exc:
-            retryable = exc.response.status_code >= 500 or exc.response.status_code == 429
+            retryable = (
+                exc.response.status_code >= 500 or exc.response.status_code == 429
+            )
             raise WeChatApiError(
                 0,
                 f"WeChat API HTTP error {exc.response.status_code}",
@@ -277,7 +364,9 @@ class WeChatApiClient:
         try:
             code = int(data.get("errcode", 0))
         except (TypeError, ValueError) as exc:
-            raise WeChatApiError(0, f"WeChat {operation} response had an invalid errcode") from exc
+            raise WeChatApiError(
+                0, f"WeChat {operation} response had an invalid errcode"
+            ) from exc
         if code == 0:
             return
         message = str(data.get("errmsg") or "WeChat API rejected the request")

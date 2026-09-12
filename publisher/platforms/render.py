@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+import re
 
 SECTION_STYLE = "font-size:16px;color:#3f3f3f;line-height:1.75;letter-spacing:0.2px;"
 PARAGRAPH_STYLE = "margin:0 0 16px;"
@@ -13,14 +14,38 @@ BLOCKQUOTE_STYLE = (
 )
 LIST_STYLE = "margin:0 0 16px;padding-left:22px;"
 LIST_ITEM_STYLE = "margin:0 0 6px;"
+MARKDOWN_IMAGE_RE = re.compile(
+    r"""!\[(?P<alt>[^\]]*)\]\((?P<url><[^>]+>|[^)\s]+)"""
+    r"""(?:\s+(?:"[^"]*"|'[^']*'|[^)]*))?\)"""
+)
+ARTICLE_IMAGE_STYLE = "max-width:100%;height:auto;display:block;margin:0 auto 16px;"
 
 
 def _escape(value: str) -> str:
     return escape(value, quote=True)
 
 
+def _render_inline(value: str) -> str:
+    """Render the small inline Markdown subset needed by article bodies."""
+    parts: list[str] = []
+    cursor = 0
+    for match in MARKDOWN_IMAGE_RE.finditer(value):
+        parts.append(_escape(value[cursor : match.start()]))
+        image_url = match.group("url").strip()
+        if image_url.startswith("<") and image_url.endswith(">"):
+            image_url = image_url[1:-1]
+        parts.append(
+            f'<img src="{_escape(image_url)}" '
+            f'alt="{_escape(match.group("alt"))}" '
+            f'style="{ARTICLE_IMAGE_STYLE}" />'
+        )
+        cursor = match.end()
+    parts.append(_escape(value[cursor:]))
+    return "".join(parts)
+
+
 def _render_paragraph(line: str) -> str:
-    return f'<p style="{PARAGRAPH_STYLE}">{_escape(line)}</p>'
+    return f'<p style="{PARAGRAPH_STYLE}">{_render_inline(line)}</p>'
 
 
 def _render_heading(line: str) -> str:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import base64
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from publisher.config import PublisherSettings
-from publisher.models import PlatformState, PublishJob, generate_id, utc_now
+from publisher.models import MediaAsset, PlatformState, PublishJob, generate_id, utc_now
 from publisher.platforms.fake import FakePublisher
 from publisher.worker.serial_worker import SerialWorker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -54,6 +55,63 @@ async def test_worker_draft_mode(
         assert j.status == "draft_saved"
         assert j.publish_phase == "draft_saved"
         assert j.platform_draft_id == f"draft_{job_id}"
+
+
+@pytest.mark.asyncio
+async def test_missing_cover_does_not_promote_later_inline_media(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+    inline_path = tmp_path / "inline.png"
+    inline_path.write_bytes(b"inline-image")
+
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            MediaAsset(
+                id="med_inline_existing",
+                file_name=inline_path.name,
+                file_path=str(inline_path),
+                content_type="image/png",
+                size_bytes=inline_path.stat().st_size,
+                checksum="inline-checksum",
+            )
+        )
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="missing-cover-no-promotion-01",
+                platform="wechat_mp",
+                mode="draft",
+                status="queued",
+                content={"title": "封面缺失", "body_text": "正文"},
+                media=[
+                    {"kind": "uploaded", "media_id": "med_missing_cover"},
+                    {"kind": "uploaded", "media_id": "med_inline_existing"},
+                ],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    with patch(
+        "publisher.worker.serial_worker.emit_notify_hub_alert",
+        new_callable=AsyncMock,
+    ):
+        assert await worker._run_next_eligible_job() is True
+
+    assert pub.save_draft_calls == 0
+    async with session_factory() as session:
+        job = await session.get(PublishJob, job_id)
+        assert job is not None
+        assert job.error_code == "COVER_FAILED"
+        assert job.status == "queued"
 
 
 @pytest.mark.asyncio
@@ -340,13 +398,15 @@ async def test_publish_not_started_is_not_treated_as_post_click_reconcile(
 
 
 @pytest.mark.asyncio
-async def test_open_saved_draft_retry_preserves_phase_and_does_not_duplicate(
+async def test_api_draft_open_retry_preserves_phase_and_does_not_duplicate(
     test_settings: PublisherSettings,
     test_db: tuple[object, async_sessionmaker[AsyncSession]],
 ) -> None:
     _engine, session_factory = test_db
     pub = FakePublisher(test_settings)
-    pub.should_fail_open_draft = RuntimeError("NETWORK_ERROR: temporary failure")
+    pub.should_fail_open_draft = RuntimeError(
+        "DRAFT_OPEN_FAILED: draft not visible yet"
+    )
     worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
 
     job_id = generate_id("job")
@@ -375,12 +435,19 @@ async def test_open_saved_draft_retry_preserves_phase_and_does_not_duplicate(
         assert failed_once is not None
         assert failed_once.status == "queued"
         assert failed_once.publish_phase == "draft_saved"
+        assert failed_once.error_code == "DRAFT_OPEN_FAILED"
 
     pub.should_fail_open_draft = None
     assert await worker._run_next_eligible_job() is True
     assert pub.save_draft_calls == 0
     assert pub.open_draft_calls == 2
     assert pub.publish_and_confirm_calls == 1
+    async with session_factory() as session:
+        published = await session.get(PublishJob, job_id)
+        assert published is not None
+        assert published.status == "published"
+        assert published.error_code is None
+        assert published.error_summary is None
 
 
 @pytest.mark.asyncio
@@ -709,7 +776,7 @@ async def test_publish_unknown_when_unconfirmed(
     test_settings: PublisherSettings,
     test_db: tuple[object, async_sessionmaker[AsyncSession]],
 ) -> None:
-    engine, session_factory = test_db
+    _engine, session_factory = test_db
     pub = FakePublisher(test_settings)
     pub.published_url_to_return = None  # verification fails to find public URL
     worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
@@ -731,13 +798,33 @@ async def test_publish_unknown_when_unconfirmed(
         session.add(job)
         await session.commit()
 
-    processed = await worker._run_next_eligible_job()
-    assert processed is True
+    with patch(
+        "publisher.worker.serial_worker.emit_notify_hub_alert",
+        new_callable=AsyncMock,
+    ) as alert:
+        processed = await worker._run_next_eligible_job()
+        assert processed is True
+        assert pub.publish_and_confirm_calls == 1
+        assert pub.verify_published_calls == 1
+        alert.assert_not_awaited()
+
+        async with session_factory() as session:
+            pending = await session.get(PublishJob, job_id)
+            assert pending is not None
+            assert pending.status == "queued"
+            assert pending.publish_phase == "reconciling"
+            assert pending.error_code is None
+
+        processed = await worker._run_next_eligible_job()
+        assert processed is True
+
     assert pub.publish_and_confirm_calls == 1
+    assert pub.reconcile_calls == 1
+    alert.assert_awaited_once()
 
     async with session_factory() as session:
         j = await session.get(PublishJob, job_id)
         assert j is not None
         assert j.status == "publish_unknown"
-        assert j.publish_phase == "publish_clicked"
+        assert j.publish_phase == "reconciling"
         assert j.error_code == "PUBLISH_RESULT_UNKNOWN"

@@ -111,7 +111,11 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         """Navigate to Xiaohongshu creator center and check if session is authenticated."""
         page = await self.get_page()
         try:
-            if "/creator/home" not in page.url and "/new/home" not in page.url and "/publish" not in page.url:
+            if (
+                "/creator/home" not in page.url
+                and "/new/home" not in page.url
+                and "/publish" not in page.url
+            ):
                 goto_res = page.goto(
                     XHS_HOME_URL,
                     timeout=int(self.settings.navigation_timeout_seconds * 1000),
@@ -122,7 +126,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                 if hasattr(page, "wait_for_timeout"):
                     try:
                         timeout_res = page.wait_for_timeout(2500)
-                        if asyncio.iscoroutine(timeout_res) or hasattr(timeout_res, "__await__"):
+                        if asyncio.iscoroutine(timeout_res) or hasattr(
+                            timeout_res, "__await__"
+                        ):
                             await timeout_res
                     except Exception:
                         await asyncio.sleep(0.5)
@@ -161,7 +167,6 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             logger.debug("xhs_check_login_failed", error=str(exc))
         return False
 
-
     async def capture_qr(self) -> str | None:
         """Locate and capture the login QR code image snippet as base64 PNG."""
         page = await self.get_page()
@@ -188,7 +193,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         # If current view is SMS login rather than QR login, click corner switch badge
         try:
             qr_title = page.get_by_text("APP扫一扫登录")
-            is_qr_mode = await qr_title.count() > 0 and await qr_title.first.is_visible()
+            is_qr_mode = (
+                await qr_title.count() > 0 and await qr_title.first.is_visible()
+            )
             if not is_qr_mode:
                 corner = page.locator(".css-jjnw1w img, .css-wemwzq").first
                 if await corner.count() > 0 and await corner.is_visible():
@@ -283,7 +290,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         for line in lines:
             stripped = line.strip()
             # If the line consists only of #words (e.g. "#OpenAI #Codex #ChatGPT #AI编程")
-            if stripped and re.match(r"^(?:#[\w\u4e00-\u9fa5\-]+(?:\s+|$))+$", stripped):
+            if stripped and re.match(
+                r"^(?:#[\w\u4e00-\u9fa5\-]+(?:\s+|$))+$", stripped
+            ):
                 found_tags = re.findall(r"#([\w\u4e00-\u9fa5\-]+)", stripped)
                 for tag in found_tags:
                     if tag.lower() not in [t.lower() for t in topics]:
@@ -324,7 +333,7 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                 if not clean_t:
                     continue
                 topic_btn = page.locator(
-                    '#topicBtn, button.topic-btn, .topic-container button'
+                    "#topicBtn, button.topic-btn, .topic-container button"
                 ).first
                 if await topic_btn.count() > 0 and await topic_btn.is_visible():
                     await topic_btn.click()
@@ -367,7 +376,11 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         with contextlib.suppress(Exception):
             tabs = page.locator(".creator-tab:not([style*='-9999'])")
             count_res = tabs.count()
-            count = await count_res if (asyncio.iscoroutine(count_res) or hasattr(count_res, "__await__")) else count_res
+            count = (
+                await count_res
+                if (asyncio.iscoroutine(count_res) or hasattr(count_res, "__await__"))
+                else count_res
+            )
             if isinstance(count, int) and count > 0:
                 for i in range(count):
                     t = tabs.nth(i)
@@ -376,12 +389,33 @@ class XiaohongshuPublisher(BasePlatformPublisher):
                     text = ""
                     if hasattr(t, "inner_text"):
                         text_res = t.inner_text()
-                        text = (await text_res if (asyncio.iscoroutine(text_res) or hasattr(text_res, "__await__")) else str(text_res)).strip()
+                        text = (
+                            await text_res
+                            if (
+                                asyncio.iscoroutine(text_res)
+                                or hasattr(text_res, "__await__")
+                            )
+                            else str(text_res)
+                        ).strip()
                     box = None
                     if hasattr(t, "bounding_box"):
                         box_res = t.bounding_box()
-                        box = await box_res if (asyncio.iscoroutine(box_res) or hasattr(box_res, "__await__")) else box_res
-                    if "上传图文" in text and (not box or (isinstance(box, dict) and box.get("x", 0) > 0 and box.get("y", 0) > 0)):
+                        box = (
+                            await box_res
+                            if (
+                                asyncio.iscoroutine(box_res)
+                                or hasattr(box_res, "__await__")
+                            )
+                            else box_res
+                        )
+                    if "上传图文" in text and (
+                        not box
+                        or (
+                            isinstance(box, dict)
+                            and box.get("x", 0) > 0
+                            and box.get("y", 0) > 0
+                        )
+                    ):
                         clk = t.click(force=True)
                         if asyncio.iscoroutine(clk) or hasattr(clk, "__await__"):
                             await clk
@@ -418,7 +452,12 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             )
             if await previews.count() > 0:
                 break
-            if await page.locator('input[placeholder*="标题"], input.title-input, input.d-text').count() > 0:
+            if (
+                await page.locator(
+                    'input[placeholder*="标题"], input.title-input, input.d-text'
+                ).count()
+                > 0
+            ):
                 break
             await asyncio.sleep(0.5)
 
@@ -428,7 +467,7 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             page.locator('input[placeholder*="填写标题"]'),
             page.locator('input.c-input_inner[placeholder*="标题"]'),
             page.locator('input.d-text[placeholder*="标题"]'),
-            page.locator('input.d-text'),
+            page.locator("input.d-text"),
             page.locator("input.title-input"),
             page.locator('input[maxlength="20"]'),
             page.locator('input[placeholder*="标题"]'),
@@ -450,7 +489,9 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             await asyncio.sleep(0.5)
 
         if not title_filled:
-            debug_path = self.settings.artifacts_dir / f"xhs_editor_not_found_{job.id}.png"
+            debug_path = (
+                self.settings.artifacts_dir / f"xhs_editor_not_found_{job.id}.png"
+            )
             with contextlib.suppress(Exception):
                 await page.screenshot(path=str(debug_path))
             raise RuntimeError("EDITOR_NOT_FOUND: Xiaohongshu title input not found")
@@ -521,14 +562,14 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         save_triggered = False
         # Priority A: call _onSave() directly on custom element xhs-publish-btn
         try:
-            save_triggered = await page.evaluate('''async () => {
+            save_triggered = await page.evaluate("""async () => {
                 const el = document.querySelector('xhs-publish-btn');
                 if (el && typeof el._onSave === 'function') {
                     await el._onSave();
                     return true;
                 }
                 return false;
-            }''')
+            }""")
         except Exception as exc:
             logger.debug("xhs_custom_element_on_save_failed", error=str(exc))
 
@@ -599,14 +640,14 @@ class XiaohongshuPublisher(BasePlatformPublisher):
         # Priority A: call _onPublish() directly on custom element xhs-publish-btn
         published = False
         try:
-            published = await page.evaluate('''async () => {
+            published = await page.evaluate("""async () => {
                 const el = document.querySelector('xhs-publish-btn');
                 if (el && typeof el._onPublish === 'function') {
                     await el._onPublish();
                     return true;
                 }
                 return false;
-            }''')
+            }""")
         except Exception as exc:
             logger.debug("xhs_custom_element_on_publish_failed", error=str(exc))
 
@@ -614,7 +655,10 @@ class XiaohongshuPublisher(BasePlatformPublisher):
             publish_btn = page.locator(
                 'button.publishBtn, button:has-text("发布"):not(:has-text("草稿")), .publish-btn'
             ).first
-            if await publish_btn.count() == 0 or not await publish_btn.first.is_visible():
+            if (
+                await publish_btn.count() == 0
+                or not await publish_btn.first.is_visible()
+            ):
                 raise RuntimeError(
                     "PUBLISH_CONFIRM_FAILED: Xiaohongshu '发布' button not found"
                 )

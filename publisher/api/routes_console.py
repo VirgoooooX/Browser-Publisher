@@ -108,19 +108,23 @@ async def console_dashboard(
         jobs_db = (await session.execute(j_stmt)).scalars().all()
 
         # 3. Calculate job statistics
-        counts_stmt = select(PublishJob.status, func.count(PublishJob.id)).group_by(PublishJob.status)
+        counts_stmt = select(PublishJob.status, func.count(PublishJob.id)).group_by(
+            PublishJob.status
+        )
         status_counts = dict((await session.execute(counts_stmt)).all())
 
         stats = {
             "total": sum(status_counts.values()),
-            "succeeded": status_counts.get("published", 0) + status_counts.get("draft_saved", 0),
+            "succeeded": status_counts.get("published", 0)
+            + status_counts.get("draft_saved", 0),
             "running": (
                 status_counts.get("running", 0)
                 + status_counts.get("queued", 0)
                 + status_counts.get("waiting_auth", 0)
                 + status_counts.get("waiting_manual_confirm", 0)
             ),
-            "failed": status_counts.get("failed", 0) + status_counts.get("publish_unknown", 0),
+            "failed": status_counts.get("failed", 0)
+            + status_counts.get("publish_unknown", 0),
         }
 
         config_info = {
@@ -135,7 +139,9 @@ async def console_dashboard(
             "wechat_mp_author": settings.wechat_mp_author,
             "xhs_default_mode": settings.xhs_default_mode,
             "xhs_min_interval_seconds": settings.xhs_min_interval_seconds,
-            "notify_alert_configured": bool(settings.notify_event_url and settings.notify_api_key),
+            "notify_alert_configured": bool(
+                settings.notify_event_url and settings.notify_api_key
+            ),
         }
 
         return templates.TemplateResponse(

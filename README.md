@@ -25,3 +25,16 @@ Browser Publisher 是公众号发布的执行网关：在配置 `PUBLISHER_WECHA
 登录态失效时仍保留登录二维码捕获；发表确认场景不截图、不转发二维码。
 
 如果公众号 API 只能通过已配置 IP 白名单的受信任代理访问，将 `PUBLISHER_WECHAT_MP_API_BASE_URL` 指向该代理的 HTTPS 入口（包括必要的路径前缀）；不要在任务请求中使用任意代理。
+
+## 图文任务与正文图片
+
+调用方先用 `POST /v1/media` 的 multipart `file` 字段上传封面和正文图片，再用 `POST /v1/jobs` 提交 JSON 任务。`media` 数组按顺序放置封面和正文图片的 `media_id`；正文中的正文图片引用使用 `publisher-media://<media_id>`。Notify Hub 的 `browser` 模式会自动完成 HTTP 正文图片的下载、上传和 marker 替换；直接调用本服务时使用随附的 `wechat-mp-publisher` Skill。
+
+`body_text` 可以继续传 Markdown/纯文本，`body_html` 可以传 HTML。Browser Publisher 只对 `publisher-media://` 做精确替换：正文图片会调用微信 `media/uploadimg`，再把返回 URL 写入最终的 `draft/add` HTML；不会从任意 HTML 中猜测本地路径，也不会把二进制图片塞进 JSON。微信公众号正文图片限 JPG/PNG、每张不超过 1 MiB；封面沿用 JPG/PNG/WebP、20 MiB 限制。
+
+例如 HTML 正文可以是：
+
+```html
+<p>正文。</p>
+<img src="publisher-media://med_inline_1" alt="正文配图">
+```

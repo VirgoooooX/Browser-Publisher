@@ -335,7 +335,10 @@ class SerialWorker:
                     )
 
             # Mark job running and increment attempt count if not already in reconciliation
-            if target_job.publish_phase not in ("reconciling", "waiting_manual_confirm"):
+            if target_job.publish_phase not in (
+                "reconciling",
+                "waiting_manual_confirm",
+            ):
                 target_job.attempt_count += 1
             target_job.status = "running"
             if not target_job.started_at:
@@ -371,28 +374,43 @@ class SerialWorker:
                 # API-created drafts and reconciliation do not need to fetch
                 # the cover again.
                 media_paths: list[Path] = []
-                if (
-                    not job.platform_draft_id
-                    and job.publish_phase
-                    not in ("reconciling", "waiting_manual_confirm")
+                if not job.platform_draft_id and job.publish_phase not in (
+                    "reconciling",
+                    "waiting_manual_confirm",
                 ):
-                    for item in job.media:
+                    for media_index, item in enumerate(job.media):
                         if item.get("kind") == "uploaded" and item.get("media_id"):
                             m_id = str(item["media_id"])
                             m_asset = await session.get(MediaAsset, m_id)
                             if m_asset:
-                                media_paths.append(Path(m_asset.file_path))
+                                media_path = Path(m_asset.file_path)
+                                if await asyncio.to_thread(media_path.is_file):
+                                    media_paths.append(media_path)
+                                elif media_index == 0:
+                                    raise RuntimeError(
+                                        "COVER_FAILED: Uploaded cover media file is unavailable"
+                                    )
+                            elif media_index == 0:
+                                raise RuntimeError(
+                                    "COVER_FAILED: Uploaded cover media is unavailable"
+                                )
                         elif item.get("kind") == "url" and item.get("url"):
                             # Download URL to temp media directory
                             dl_path = await self._download_temp_media(str(item["url"]))
                             if dl_path:
                                 media_paths.append(dl_path)
                                 temp_media_files.append(dl_path)
+                            elif media_index == 0:
+                                raise RuntimeError(
+                                    "COVER_FAILED: Cover image could not be downloaded"
+                                )
 
                 # 2. Check if we are waiting for a human confirmation. This
                 # branch is strictly verify/reconcile and never clicks again.
                 if job.publish_phase == "waiting_manual_confirm":
-                    logger.info("executing_manual_confirmation_reconcile", job_id=job.id)
+                    logger.info(
+                        "executing_manual_confirmation_reconcile", job_id=job.id
+                    )
                     published_url = await publisher.verify_published(job, start_time)
                     if published_url:
                         job.status = "published"
@@ -419,6 +437,8 @@ class SerialWorker:
                         job.status = "published"
                         job.final_url = published_url
                         job.finished_at = datetime.now(UTC)
+                        job.error_code = None
+                        job.error_summary = None
                         await self._record_platform_success(
                             session, platform_name, job.id
                         )
@@ -470,6 +490,8 @@ class SerialWorker:
                             "DRAFT_OPEN_FAILED: Saved draft URL or platform draft id is unavailable"
                         )
                     await publisher.open_draft(job.final_url, job=job)
+                    job.error_code = None
+                    job.error_summary = None
                     job.publish_phase = "publish_intent"
                     await session.commit()
 
@@ -492,16 +514,18 @@ class SerialWorker:
                         job.status = "published"
                         job.final_url = published_url
                         job.finished_at = datetime.now(UTC)
+                        job.error_code = None
+                        job.error_summary = None
                         await self._record_platform_success(
                             session, platform_name, job.id
                         )
                     else:
-                        job.status = "publish_unknown"
-                        job.error_code = "PUBLISH_RESULT_UNKNOWN"
-                        job.error_summary = (
-                            "Publish confirmed but published URL could not be retrieved"
-                        )
-                        job.finished_at = datetime.now(UTC)
+                        # Persist one extra read-only pass.  WeChat's published
+                        # list can lag behind the successful final click.
+                        job.status = "queued"
+                        job.publish_phase = "reconciling"
+                        job.error_code = None
+                        job.error_summary = None
                         await self._record_platform_finish(
                             session, platform_name, job.id
                         )
@@ -526,7 +550,9 @@ class SerialWorker:
                     return
 
                 # mode == "publish"
-                if (job.final_url or job.platform_draft_id) and job.platform != "xiaohongshu":
+                if (
+                    job.final_url or job.platform_draft_id
+                ) and job.platform != "xiaohongshu":
                     await publisher.open_draft(job.final_url, job=job)
 
                 job.publish_phase = "publish_intent"
@@ -538,9 +564,7 @@ class SerialWorker:
                     job.status = "waiting_manual_confirm"
                     job.error_code = None
                     job.error_summary = None
-                    await self._record_platform_finish(
-                        session, platform_name, job.id
-                    )
+                    await self._record_platform_finish(session, platform_name, job.id)
                     await session.commit()
                     return
                 job.publish_phase = "publish_clicked"
@@ -551,28 +575,17 @@ class SerialWorker:
                     job.status = "published"
                     job.final_url = published_url
                     job.finished_at = datetime.now(UTC)
+                    job.error_code = None
+                    job.error_summary = None
                     await self._record_platform_success(session, platform_name, job.id)
                 else:
-                    job.status = "publish_unknown"
-                    job.error_code = "PUBLISH_RESULT_UNKNOWN"
-                    job.error_summary = (
-                        "Publish confirmed but public URL could not be retrieved "
-                        "immediately"
-                    )
-                    job.finished_at = datetime.now(UTC)
+                    # Persist one extra read-only pass.  The reconciling phase
+                    # never returns to the publish click path.
+                    job.status = "queued"
+                    job.publish_phase = "reconciling"
+                    job.error_code = None
+                    job.error_summary = None
                     await self._record_platform_finish(session, platform_name, job.id)
-                    await emit_notify_hub_alert(
-                        self.settings,
-                        event_type="publisher.job.publish_unknown",
-                        event_key=f"job-unknown-{job.id}",
-                        title=f"【{platform_name}】发布结果未知 (publish_unknown)",
-                        content=(
-                            f"任务 {job.id} 标题《{job.content.get('title')}》已点击最终发布，"
-                            f"但核对超时未确认。请人工在平台检查。控制台：{self.settings.console_public_url}"
-                        ),
-                        level="critical",
-                        payload={"job_id": job.id, "platform": platform_name},
-                    )
                 await session.commit()
 
             except Exception as exc:
@@ -674,7 +687,6 @@ class SerialWorker:
         non_retryable = {
             "CONTENT_REJECTED",
             "PUBLISH_QUOTA_EXHAUSTED",
-            "DRAFT_OPEN_FAILED",
             "PUBLISH_NOT_STARTED",
             "PUBLISH_CONFIRM_FAILED",
             "PROVIDER_UI_CHANGED",

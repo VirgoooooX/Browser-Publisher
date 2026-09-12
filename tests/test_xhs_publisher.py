@@ -205,4 +205,3 @@ def test_xhs_extract_and_clean_topics() -> None:
     )
     assert clean_body == "第一段正文说明。\n\n原推作者：@someone\n原推内容：Some text."
     assert topics == ["codex", "openai", "ChatGPT", "AI编程"]
-
