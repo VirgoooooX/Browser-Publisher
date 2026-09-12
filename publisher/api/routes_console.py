@@ -128,7 +128,7 @@ async def console_dashboard(
         }
 
         config_info = {
-            "version": "0.2.0",
+            "version": "0.3.0",
             "data_dir": str(settings.data_dir),
             "port": settings.port,
             "headless": settings.headless,
