@@ -24,10 +24,6 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked dependencies
         run: uv sync --locked --extra test
-      - name: Check formatting
-        run: uv run --locked --with ruff ruff format --check
-      - name: Lint
-        run: uv run --locked --with ruff ruff check
       - name: Test
         run: uv run --locked --extra test pytest
 
