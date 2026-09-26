@@ -58,6 +58,95 @@ async def test_worker_draft_mode(
 
 
 @pytest.mark.asyncio
+async def test_api_draft_ignores_expired_browser_session(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings, is_logged_in=False, api_draft=True)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="api-draft-without-browser-login",
+                platform="wechat_mp",
+                mode="draft",
+                status="queued",
+                content={"title": "API 草稿", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 1
+    assert pub.check_login_calls == 0
+    async with session_factory() as session:
+        job = await session.get(PublishJob, job_id)
+        assert job is not None
+        assert job.status == "draft_saved"
+        assert job.platform_draft_id == f"draft_{job_id}"
+
+
+@pytest.mark.asyncio
+async def test_api_publish_saves_draft_before_waiting_for_browser_login(
+    test_settings: PublisherSettings,
+    test_db: tuple[object, async_sessionmaker[AsyncSession]],
+) -> None:
+    _engine, session_factory = test_db
+    pub = FakePublisher(test_settings, is_logged_in=False, api_draft=True)
+    worker = SerialWorker(test_settings, session_factory, {"wechat_mp": pub})
+    job_id = generate_id("job")
+    async with session_factory() as session:
+        session.add(
+            PublishJob(
+                id=job_id,
+                client_request_id="api-publish-before-browser-login",
+                platform="wechat_mp",
+                mode="publish",
+                status="queued",
+                content={"title": "API 草稿等待发表", "body_text": "正文"},
+                media=[],
+                topics=[],
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        await session.commit()
+
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 1
+    assert pub.open_draft_calls == 0
+    async with session_factory() as session:
+        job = await session.get(PublishJob, job_id)
+        assert job is not None
+        assert job.status == "waiting_auth"
+        assert job.publish_phase == "draft_saved"
+        assert job.platform_draft_id == f"draft_{job_id}"
+
+    with patch(
+        "publisher.worker.serial_worker.emit_notify_hub_alert",
+        new_callable=AsyncMock,
+    ):
+        assert await worker._run_next_eligible_job() is False
+    assert pub.save_draft_calls == 1
+
+    pub.is_logged_in = True
+    assert await worker._run_next_eligible_job() is True
+    assert pub.save_draft_calls == 1
+    assert pub.open_draft_calls == 1
+    async with session_factory() as session:
+        job = await session.get(PublishJob, job_id)
+        assert job is not None
+        assert job.status == "published"
+
+
+@pytest.mark.asyncio
 async def test_missing_cover_does_not_promote_later_inline_media(
     test_settings: PublisherSettings,
     test_db: tuple[object, async_sessionmaker[AsyncSession]],

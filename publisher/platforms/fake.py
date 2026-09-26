@@ -17,10 +17,12 @@ class FakePublisher(BasePlatformPublisher):
         *,
         is_logged_in: bool = True,
         qr_data: str | None = "fake_qr_data_base64",
+        api_draft: bool = False,
     ) -> None:
         super().__init__(settings)
         self.is_logged_in = is_logged_in
         self.qr_data = qr_data
+        self.api_draft = api_draft
         self.started = False
         self.closed = False
 
@@ -35,6 +37,7 @@ class FakePublisher(BasePlatformPublisher):
 
         # Tracking calls
         self.save_draft_calls = 0
+        self.check_login_calls = 0
         self.open_draft_calls = 0
         self.publish_and_confirm_calls = 0
         self.verify_published_calls = 0
@@ -47,7 +50,16 @@ class FakePublisher(BasePlatformPublisher):
         self.closed = True
 
     async def check_login(self) -> bool:
+        self.check_login_calls += 1
         return self.is_logged_in
+
+    @property
+    def draft_creation_phase(self) -> str:
+        return "api_creating_draft" if self.api_draft else "editing"
+
+    @property
+    def draft_requires_browser_login(self) -> bool:
+        return not self.api_draft
 
     async def capture_qr(self) -> str | None:
         return self.qr_data

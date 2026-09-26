@@ -239,9 +239,13 @@ class SerialWorker:
                 await session.commit()
                 return True
 
-            # Check authentication on target platform
-            is_logged_in = await publisher.check_login()
-            if not is_logged_in:
+            # An API-backed fresh draft can be created without the browser
+            # session. Saved drafts and browser editing still need login.
+            needs_browser_login = (
+                target_job.publish_phase is not None
+                or publisher.draft_requires_browser_login
+            )
+            if needs_browser_login and not await publisher.check_login():
                 target_job.status = "waiting_auth"
                 p_state = platforms.get(platform_name)
                 incident_id = p_state.alert_incident_id if p_state else None
@@ -305,7 +309,11 @@ class SerialWorker:
 
             # Authenticated! If platform state was auth_required, transition to ready
             p_state = platforms.get(platform_name)
-            if p_state and p_state.session_state == "auth_required":
+            if (
+                needs_browser_login
+                and p_state
+                and p_state.session_state == "auth_required"
+            ):
                 old_incident = p_state.alert_incident_id
                 await session.execute(
                     update(PlatformState)
@@ -550,6 +558,15 @@ class SerialWorker:
                     return
 
                 # mode == "publish"
+                if (
+                    not publisher.draft_requires_browser_login
+                    and not await publisher.check_login()
+                ):
+                    # Keep the durable API draft checkpoint. The next pass
+                    # captures a login QR, then resumes publication only.
+                    raise RuntimeError(
+                        "AUTH_REQUIRED: Browser session is required to publish the saved draft"
+                    )
                 if (
                     job.final_url or job.platform_draft_id
                 ) and job.platform != "xiaohongshu":

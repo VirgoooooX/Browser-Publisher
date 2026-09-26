@@ -78,6 +78,12 @@ class WeChatPublisher(BasePlatformPublisher):
 
         return "api_creating_draft" if self._wechat_api is not None else "editing"
 
+    @property
+    def draft_requires_browser_login(self) -> bool:
+        """The official draft API uses credentials independent of Playwright."""
+
+        return self._wechat_api is None
+
     async def get_context(self) -> Any:
         """Return the shared or dedicated browser context."""
         if self._browser_manager is not None:

@@ -50,6 +50,12 @@ class BasePlatformPublisher(ABC):
 
         return "editing"
 
+    @property
+    def draft_requires_browser_login(self) -> bool:
+        """Whether a fresh draft needs an authenticated browser session."""
+
+        return True
+
     @abstractmethod
     async def open_draft(
         self, draft_url: str | None, *, job: PublishJob | None = None
