@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -99,9 +101,19 @@ async def console_dashboard(
                     "current_job_id": p.current_job_id,
                     "last_publish_at": p.last_publish_at,
                     "last_auth_at": p.last_auth_at,
+                    "last_session_check_at": p.last_session_check_at,
                     "has_qr_code": has_qr,
                 }
             )
+
+        for item in platforms_list:
+            for field in ("last_auth_at", "last_publish_at", "last_session_check_at"):
+                if item[field] is not None:
+                    item[field] = (
+                        item[field]
+                        .replace(tzinfo=UTC)
+                        .astimezone(ZoneInfo("Asia/Shanghai"))
+                    )
 
         # 2. Fetch recent jobs
         j_stmt = select(PublishJob).order_by(PublishJob.created_at.desc()).limit(50)

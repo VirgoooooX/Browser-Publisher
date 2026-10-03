@@ -131,6 +131,12 @@ class PlatformState(Base):
     last_auth_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    last_session_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auth_alert_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_publish_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

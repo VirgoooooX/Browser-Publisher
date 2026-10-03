@@ -1,8 +1,8 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from publisher.config import PublisherSettings
 from publisher.database import Base
 from publisher.models import *  # noqa: F401, F403
@@ -16,7 +16,7 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    settings = PublisherSettings()
+    settings = config.attributes.get("publisher_settings") or PublisherSettings()
     settings.ensure_directories()
     return settings.sync_db_url
 

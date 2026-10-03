@@ -126,11 +126,15 @@
               <span class="info-val">{{ p.last_publish_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_publish_at else '无历史记录' }}</span>
             </div>
             <div class="info-row">
-              <span class="info-label">最近认证时间</span>
+              <span class="info-label">最近认证时间（北京时间）</span>
               <span class="info-val">{{ p.last_auth_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_auth_at else '无历史记录' }}</span>
             </div>
 
             {% if p.platform == "wechat_mp" %}
+            <div class="info-row">
+              <span class="info-label">最近登录检查（北京时间）</span>
+              <span class="info-val">{{ p.last_session_check_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_session_check_at else '尚未检查' }}</span>
+            </div>
             <div class="info-row">
               <span class="info-label">草稿创建模式</span>
               <span class="info-val" style="color: #6ee7b7;">

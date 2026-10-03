@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
@@ -15,6 +16,15 @@ SESSION_COOKIE_NAME = "publisher_session"
 SESSION_MAX_AGE = 86400  # 24 hours
 
 http_bearer = HTTPBearer(auto_error=False)
+
+
+def safe_error_summary(exc: Exception) -> str:
+    """Remove credentials from browser navigation errors before logging/storing them."""
+    return re.sub(
+        r"(?i)([?&](?:token|access_token|key|secret|signature|sig)=)[^&\s\"']+",
+        r"\1[redacted]",
+        str(exc),
+    )[:1000]
 
 
 def get_settings(request: Request) -> PublisherSettings:

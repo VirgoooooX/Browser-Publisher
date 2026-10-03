@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import contextlib
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import structlog
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from publisher.config import PublisherSettings
 from publisher.models import MediaAsset, PlatformState, PublishJob
 from publisher.notify_alert import emit_notify_hub_alert
 from publisher.platforms.base import BasePlatformPublisher
+from publisher.security import safe_error_summary
+from publisher.session_service import SessionService
 from publisher.worker.clean_artifacts import clean_screenshots
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger()
 
@@ -63,10 +65,16 @@ class SerialWorker:
         settings: PublisherSettings,
         session_factory: async_sessionmaker[AsyncSession],
         publishers: dict[str, BasePlatformPublisher],
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.publishers = publishers
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.sessions = SessionService(settings, session_factory, self.clock)
+        self._browser_lock = asyncio.Lock()
+        for publisher in publishers.values():
+            publisher.operation_lock = self._browser_lock
         self._running = False
         self._loop_task: asyncio.Task[None] | None = None
 
@@ -162,16 +170,65 @@ class SerialWorker:
     async def _main_loop(self) -> None:
         while self._running:
             try:
+                await self._maintain_sessions()
                 processed = await self._run_next_eligible_job()
                 if not processed:
                     await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("worker_main_loop_error", error=str(exc))
+                logger.error("worker_main_loop_error", error=safe_error_summary(exc))
                 await asyncio.sleep(3.0)
 
     async def _run_next_eligible_job(self) -> bool:
+        async with self._browser_lock:
+            return await self._run_next_eligible_job_locked()
+
+    async def _maintain_sessions(self) -> None:
+        """Check WeChat hourly, and detect QR recovery even when there are no jobs."""
+        publisher = self.publishers.get("wechat_mp")
+        if publisher is None:
+            return
+        async with self._browser_lock:
+            now = self.clock()
+            async with self.session_factory() as session:
+                state = await session.get(PlatformState, "wechat_mp")
+                if state is None or state.is_paused or state.current_job_id:
+                    return
+                interval = self.settings.session_check_interval_seconds
+                if state.session_state == "auth_required":
+                    interval = self.settings.auth_poll_interval_seconds
+                elif state.last_error_code in {"NETWORK_ERROR", "EDITOR_TIMEOUT"}:
+                    interval = 60
+                checked = state.last_session_check_at
+                if checked and now - checked.replace(tzinfo=UTC) < timedelta(
+                    seconds=interval
+                ):
+                    return
+                state.last_session_check_at = now
+                await session.commit()
+            try:
+                logged_in = await publisher.refresh_session()
+                if logged_in:
+                    await self.sessions.record_ready("wechat_mp")
+                else:
+                    await self.sessions.record_auth_required("wechat_mp", publisher)
+            except Exception as exc:
+                # A network outage is not evidence that login was revoked.
+                summary = safe_error_summary(exc)
+                logger.warning("session_probe_failed", error=summary)
+                async with self.session_factory() as session:
+                    await session.execute(
+                        update(PlatformState)
+                        .where(PlatformState.platform == "wechat_mp")
+                        .values(
+                            last_error_code=parse_error_code(exc),
+                            last_error_message=summary,
+                        )
+                    )
+                    await session.commit()
+
+    async def _run_next_eligible_job_locked(self) -> bool:
         """Find the next eligible queued or waiting job and process it."""
         async with self.session_factory() as session:
             # 1. Check all platform states
@@ -218,6 +275,18 @@ class SerialWorker:
                         # Xiaohongshu 1800s cooldown active; skip
                         continue
 
+                if (
+                    job.status == "waiting_auth"
+                    and p_state
+                    and p_state.session_state == "auth_required"
+                    and p_state.last_session_check_at
+                ):
+                    checked = p_state.last_session_check_at.replace(tzinfo=UTC)
+                    if self.clock() - checked < timedelta(
+                        seconds=self.settings.auth_poll_interval_seconds
+                    ):
+                        continue
+
                 target_job = job
                 break
 
@@ -245,102 +314,15 @@ class SerialWorker:
                 target_job.publish_phase is not None
                 or publisher.draft_requires_browser_login
             )
-            if needs_browser_login and not await publisher.check_login():
-                target_job.status = "waiting_auth"
-                p_state = platforms.get(platform_name)
-                incident_id = p_state.alert_incident_id if p_state else None
-                is_new_incident = not incident_id
-                if not incident_id:
-                    incident_id = uuid.uuid4().hex[:12]
-                qr_b64 = (
-                    p_state.qr_code_base64
-                    if p_state and incident_id and p_state.qr_code_base64
-                    else await publisher.capture_qr()
-                )
-
-                await session.execute(
-                    update(PlatformState)
-                    .where(PlatformState.platform == platform_name)
-                    .values(
-                        session_state="auth_required",
-                        qr_code_base64=qr_b64,
-                        alert_incident_id=incident_id,
-                        last_error_code="AUTH_REQUIRED",
-                        last_error_message="Platform session expired or not authenticated",
-                        updated_at=datetime.now(UTC),
-                    )
-                )
-                await session.commit()
-
-                qr_image_path: Path | None = None
-                if qr_b64:
-                    try:
-                        raw_qr = qr_b64.split(",", 1)[-1]
-                        qr_bytes = base64.b64decode(raw_qr, validate=True)
-                        if qr_bytes:
-                            self.settings.artifacts_dir.mkdir(
-                                parents=True, exist_ok=True
-                            )
-                            qr_image_path = (
-                                self.settings.artifacts_dir
-                                / f"{platform_name}_login_{incident_id}.png"
-                            )
-                            qr_image_path.write_bytes(qr_bytes)
-                    except (binascii.Error, OSError, ValueError) as exc:
-                        logger.debug("login_qr_artifact_write_failed", error=str(exc))
-
-                # Emit one alert per auth incident; the worker polls waiting_auth
-                # jobs and must not resend the same QR on every loop.
-                if is_new_incident:
-                    await emit_notify_hub_alert(
-                        self.settings,
-                        event_type="publisher.session.auth_required",
-                        event_key=f"auth-required-{platform_name}-{incident_id}",
-                        title=f"【{platform_name}】发布器需要扫码登录",
-                        content=(
-                            f"平台 {platform_name} 会话已过期，当前任务已暂停并进入 waiting_auth。"
-                            f"请打开控制台扫码登录：{self.settings.console_public_url}"
-                        ),
-                        level="warning",
-                        payload={"platform": platform_name, "incident_id": incident_id},
-                        image_path=qr_image_path,
-                    )
-                return False
-
-            # Authenticated! If platform state was auth_required, transition to ready
-            p_state = platforms.get(platform_name)
-            if (
-                needs_browser_login
-                and p_state
-                and p_state.session_state == "auth_required"
-            ):
-                old_incident = p_state.alert_incident_id
-                await session.execute(
-                    update(PlatformState)
-                    .where(PlatformState.platform == platform_name)
-                    .values(
-                        session_state="ready",
-                        qr_code_base64=None,
-                        alert_incident_id=None,
-                        last_error_code=None,
-                        last_error_message=None,
-                        last_auth_at=datetime.now(UTC),
-                        updated_at=datetime.now(UTC),
-                    )
-                )
-                if old_incident:
-                    await emit_notify_hub_alert(
-                        self.settings,
-                        event_type="publisher.session.recovered",
-                        event_key=f"auth-recovered-{platform_name}-{old_incident}",
-                        title=f"【{platform_name}】发布器登录态已恢复",
-                        content=(
-                            f"平台 {platform_name} 扫码成功，会话恢复为 ready，"
-                            "继续执行发布队列。"
-                        ),
-                        level="info",
-                        payload={"platform": platform_name},
-                    )
+            # Close the read transaction before touching the browser or Notify Hub.
+            await session.commit()
+            if needs_browser_login:
+                if not await publisher.check_login():
+                    target_job.status = "waiting_auth"
+                    await session.commit()
+                    await self.sessions.record_auth_required(platform_name, publisher)
+                    return False
+                await self.sessions.record_ready(platform_name)
 
             # Mark job running and increment attempt count if not already in reconciliation
             if target_job.publish_phase not in (
@@ -627,7 +609,7 @@ class SerialWorker:
         exc: Exception,
     ) -> None:
         err_code = parse_error_code(exc)
-        err_msg = str(exc)[:1000]
+        err_msg = safe_error_summary(exc)
         logger.error(
             "job_execution_failed",
             job_id=job.id,
@@ -683,21 +665,25 @@ class SerialWorker:
             return
 
         if err_code == "AUTH_REQUIRED":
-            # Session expired during execution: release back to waiting_auth without attempt penalty
             job.status = "waiting_auth"
-            job.attempt_count = max(0, job.attempt_count - 1)
+            if job.publish_phase in (
+                "publish_intent",
+                "publish_clicked",
+                "reconciling",
+            ):
+                # Authentication recovery must never repeat a possibly completed click.
+                job.publish_phase = "reconciling"
+            elif job.publish_phase != "waiting_manual_confirm":
+                job.attempt_count = max(0, job.attempt_count - 1)
             await session.execute(
                 update(PlatformState)
                 .where(PlatformState.platform == platform_name)
-                .values(
-                    session_state="auth_required",
-                    current_job_id=None,
-                    last_error_code="AUTH_REQUIRED",
-                    last_error_message=err_msg,
-                    updated_at=datetime.now(UTC),
-                )
+                .values(current_job_id=None)
             )
             await session.commit()
+            await self.sessions.record_auth_required(
+                platform_name, self.publishers[platform_name]
+            )
             return
 
         # Check retryability

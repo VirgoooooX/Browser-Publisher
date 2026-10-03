@@ -2,30 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
 
+from publisher.config import PublisherSettings
 from publisher.models import PlatformState, utc_now
 from publisher.schemas import PlatformDetail, PlatformListResponse, PlatformType
-from publisher.security import require_console_auth
+from publisher.security import get_settings, require_console_auth
+from publisher.session_service import SessionService
 
 router = APIRouter(
     prefix="/v1/platforms",
     tags=["platforms"],
     dependencies=[Depends(require_console_auth)],
 )
-
-_platform_locks: dict[str, asyncio.Lock] = {}
-
-
-def get_platform_lock(platform: str) -> asyncio.Lock:
-    if platform not in _platform_locks:
-        _platform_locks[platform] = asyncio.Lock()
-    return _platform_locks[platform]
 
 
 def get_db(request: Request) -> object:
@@ -62,6 +55,7 @@ async def request_platform_login(
     platform: PlatformType,
     session_factory: Annotated[object, Depends(get_db)],
     publishers: Annotated[dict[str, object], Depends(get_publishers)],
+    settings: Annotated[PublisherSettings, Depends(get_settings)],
 ) -> dict[str, Any]:
     pub = publishers.get(platform)
     if not pub:
@@ -69,34 +63,25 @@ async def request_platform_login(
             status_code=404, detail=f"Platform '{platform}' not configured"
         )
 
-    lock = get_platform_lock(platform)
+    lock = pub.operation_lock
     async with lock:
         is_logged_in = await pub.check_login()
-        async with session_factory() as session:
-            if is_logged_in:
-                await session.execute(
-                    update(PlatformState)
-                    .where(PlatformState.platform == platform)
-                    .values(
-                        session_state="ready",
-                        qr_code_base64=None,
-                        alert_incident_id=None,
-                        updated_at=utc_now(),
-                    )
-                )
-                await session.commit()
-                return {"platform": platform, "status": "already_authenticated"}
+        if is_logged_in:
+            await SessionService(settings, session_factory).record_ready(platform)
+            return {"platform": platform, "status": "already_authenticated"}
 
-            qr_b64 = await pub.capture_qr()
+        # Refresh login QR only, preserving the incident key and alert receipt.
+        qr_b64 = await pub.capture_qr()
+        async with session_factory() as session:
             await session.execute(
                 update(PlatformState)
                 .where(PlatformState.platform == platform)
                 .values(
                     session_state="auth_required",
                     qr_code_base64=qr_b64,
-                    alert_incident_id=None,
-                    last_error_code=None,
-                    last_error_message=None,
+                    last_session_check_at=None,
+                    last_error_code="AUTH_REQUIRED",
+                    last_error_message="请扫码登录",
                     updated_at=utc_now(),
                 )
             )
@@ -157,7 +142,7 @@ async def reauth_platform(
             status_code=404, detail=f"Platform '{platform}' not configured"
         )
 
-    lock = get_platform_lock(platform)
+    lock = pub.operation_lock
     async with lock:
         await pub.clear_auth()
         qr_b64 = await pub.capture_qr()
@@ -170,6 +155,8 @@ async def reauth_platform(
                     session_state="auth_required",
                     qr_code_base64=qr_b64,
                     alert_incident_id=None,
+                    auth_alert_sent_at=None,
+                    last_session_check_at=None,
                     last_error_code=None,
                     last_error_message=None,
                     updated_at=utc_now(),

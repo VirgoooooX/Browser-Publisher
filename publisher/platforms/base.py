@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ class BasePlatformPublisher(ABC):
 
     def __init__(self, settings: PublisherSettings) -> None:
         self.settings = settings
+        self.operation_lock = asyncio.Lock()
 
     @abstractmethod
     async def start(self) -> None:
@@ -27,6 +29,10 @@ class BasePlatformPublisher(ABC):
     @abstractmethod
     async def check_login(self) -> bool:
         """Return True if session is authenticated, False otherwise."""
+
+    async def refresh_session(self) -> bool:
+        """Read-only session probe, serialized with publishing and console actions."""
+        return await self.check_login()
 
     @abstractmethod
     async def capture_qr(self) -> str | None:

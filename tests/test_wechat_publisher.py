@@ -9,12 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from pydantic import SecretStr
+
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob, utc_now
 from publisher.notify_alert import emit_notify_hub_alert
 from publisher.platforms.render import render_wechat_html
 from publisher.platforms.wechat import CONFIRM_BUTTON_NAMES, WeChatPublisher
-from pydantic import SecretStr
 
 
 def test_render_wechat_html_strips_duplicate_h1_and_cleans_quotes() -> None:
@@ -244,6 +245,15 @@ async def test_wechat_check_login_success(test_settings: PublisherSettings) -> N
     publisher = WeChatPublisher(test_settings)
     mock_page = MagicMock()
     mock_page.url = "https://mp.weixin.qq.com/cgi-bin/home?t=home/index"
+    empty = MagicMock()
+    empty.count = AsyncMock(return_value=0)
+    account = MagicMock()
+    account.count = AsyncMock(return_value=1)
+    account.first.is_visible = AsyncMock(return_value=True)
+    mock_page.get_by_text.return_value = empty
+    mock_page.locator.side_effect = lambda selector: (
+        account if selector == ".weui-desktop-account__info" else empty
+    )
 
     with patch.object(publisher, "get_page", new_callable=AsyncMock) as mock_get_page:
         mock_get_page.return_value = mock_page
@@ -363,6 +373,7 @@ async def test_wechat_open_draft_reuses_current_editor(
     page.goto = AsyncMock()
     publisher.get_page = AsyncMock(return_value=page)  # type: ignore[method-assign]
 
+    publisher._page_requires_login = AsyncMock(return_value=False)
     await publisher.open_draft(draft_url)
 
     page.goto.assert_not_awaited()
@@ -395,6 +406,7 @@ async def test_wechat_api_draft_opens_matching_title_and_adds_editor_token(
     test_settings: PublisherSettings,
 ) -> None:
     publisher = WeChatPublisher(test_settings)
+    publisher._ensure_page_token = AsyncMock(return_value="token-1")
     page = MagicMock()
     page.url = "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&token=token-1"
     page.goto = AsyncMock(side_effect=lambda url, **_: setattr(page, "url", url))
@@ -450,6 +462,7 @@ async def test_wechat_api_draft_opens_hover_edit_control_in_new_page(
     test_settings: PublisherSettings,
 ) -> None:
     publisher = WeChatPublisher(test_settings)
+    publisher._ensure_page_token = AsyncMock(return_value="token-1")
     page = MagicMock()
     page.url = "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&token=token-1"
     page.goto = AsyncMock(side_effect=lambda url, **_: setattr(page, "url", url))
@@ -528,6 +541,7 @@ async def test_wechat_api_draft_waits_for_async_list_hydration(
     test_settings: PublisherSettings,
 ) -> None:
     publisher = WeChatPublisher(test_settings)
+    publisher._ensure_page_token = AsyncMock(return_value="token-1")
     page = MagicMock()
     page.url = "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&token=token-1"
 

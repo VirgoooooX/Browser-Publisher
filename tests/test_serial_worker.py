@@ -8,11 +8,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from publisher.config import PublisherSettings
 from publisher.models import MediaAsset, PlatformState, PublishJob, generate_id, utc_now
 from publisher.platforms.fake import FakePublisher
 from publisher.worker.serial_worker import SerialWorker
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
@@ -137,6 +138,8 @@ async def test_api_publish_saves_draft_before_waiting_for_browser_login(
     assert pub.save_draft_calls == 1
 
     pub.is_logged_in = True
+    worker.clock = lambda: utc_now() + timedelta(seconds=16)
+    await worker._maintain_sessions()
     assert await worker._run_next_eligible_job() is True
     assert pub.save_draft_calls == 1
     assert pub.open_draft_calls == 1
@@ -803,6 +806,8 @@ async def test_auth_expired_enters_waiting_auth(
 
     # Now simulate user scans QR code and logs in!
     pub.is_logged_in = True
+    worker.clock = lambda: utc_now() + timedelta(seconds=16)
+    await worker._maintain_sessions()
     processed = await worker._run_next_eligible_job()
     assert processed is True
 
@@ -847,7 +852,7 @@ async def test_auth_alert_includes_login_qr_image(
         await session.commit()
 
     with patch(
-        "publisher.worker.serial_worker.emit_notify_hub_alert",
+        "publisher.session_service.emit_notify_hub_alert",
         new_callable=AsyncMock,
     ) as alert:
         await worker._run_next_eligible_job()

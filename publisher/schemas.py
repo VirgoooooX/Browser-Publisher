@@ -171,6 +171,7 @@ class PlatformDetail(BaseModel):
     last_error_message: str | None = None
     current_job_id: str | None = None
     last_auth_at: datetime | None = None
+    last_session_check_at: datetime | None = None
     last_publish_at: datetime | None = None
     updated_at: datetime
     has_qr_code: bool = False

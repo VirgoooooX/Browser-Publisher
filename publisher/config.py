@@ -81,6 +81,16 @@ class PublisherSettings(BaseSettings):
         default=30,
         description="Timeout in seconds for page navigation",
     )
+    session_check_interval_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description="Idle WeChat session check/keepalive interval; does not guarantee renewal",
+    )
+    auth_poll_interval_seconds: int = Field(
+        default=15,
+        ge=5,
+        description="Session recovery check interval while waiting for QR login",
+    )
 
     console_public_url: str = Field(
         default="http://192.168.31.100:8790",

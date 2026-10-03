@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -18,6 +19,7 @@ from publisher.api.routes_media import router as media_router
 from publisher.api.routes_platforms import router as platforms_router
 from publisher.config import PublisherSettings
 from publisher.database import Base, create_engine_and_sessionmaker
+from publisher.migrations import upgrade_database
 from publisher.models import PlatformState, utc_now
 from publisher.platforms.browser import BrowserManager
 from publisher.platforms.wechat import WeChatPublisher
@@ -31,6 +33,8 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings: PublisherSettings = app.state.settings
     settings.ensure_directories()
+
+    await asyncio.to_thread(upgrade_database, settings)
 
     # 1. Database engine & sessionmaker
     engine, session_factory = create_engine_and_sessionmaker(settings)

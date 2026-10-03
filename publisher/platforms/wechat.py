@@ -13,11 +13,13 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunspl
 
 import httpx
 import structlog
+
 from publisher.config import PublisherSettings
 from publisher.models import PublishJob
 from publisher.platforms.base import BasePlatformPublisher
 from publisher.platforms.render import render_wechat_html
 from publisher.platforms.wechat_api import WeChatApiClient
+from publisher.security import safe_error_summary
 
 logger = structlog.get_logger()
 
@@ -153,54 +155,101 @@ class WeChatPublisher(BasePlatformPublisher):
         self._active_page = pages[0] if pages else await self._context.new_page()
         return self._active_page
 
+    async def _page_requires_login(self, page: Any) -> bool:
+        if "login" in urlsplit(str(page.url)).path.lower():
+            return True
+        for text in (
+            "登录超时",
+            "请重新登录",
+            "重新扫码登录",
+            "微信扫一扫，选择公众平台账号登录",
+        ):
+            locator = page.get_by_text(text, exact=False)
+            if await locator.count() and await locator.first.is_visible():
+                return True
+        for selector in QR_SELECTORS:
+            locator = page.locator(selector)
+            if await locator.count() and await locator.first.is_visible():
+                return True
+        return False
+
+    async def _page_is_authenticated(self, page: Any) -> bool:
+        # An expired session can return HTTP 200 on the original /cgi-bin URL.
+        if await self._page_requires_login(page):
+            return False
+        for locator in (
+            page.locator(".weui-desktop-account__info"),
+            page.get_by_text("新的创作", exact=False),
+            page.get_by_text("近期草稿", exact=False),
+        ):
+            if await locator.count() and await locator.first.is_visible():
+                return True
+        if "action=edit" in page.url or "appmsg_edit" in page.url:
+            entry, _ = await self._find_publish_entry(page)
+            return entry is not None
+        return False
+
+    async def _raise_if_auth_required(self, page: Any) -> None:
+        if await self._page_requires_login(page):
+            raise RuntimeError(
+                "AUTH_REQUIRED: WeChat browser session expired; scan to log in again"
+            )
+
     async def check_login(self) -> bool:
-        """Navigate to MP home and check if session is authenticated."""
+        """Inspect authenticated DOM rather than trusting the page URL."""
         page = await self.get_page()
         try:
-            if MP_ORIGIN not in page.url:
+            if urlsplit(page.url).netloc != "mp.weixin.qq.com":
                 await page.goto(
                     MP_HOME_URL,
                     timeout=int(self.settings.navigation_timeout_seconds * 1000),
                     wait_until="domcontentloaded",
                 )
-            url = page.url
-            if "/cgi-bin/" in url and "login" not in url:
-                return True
-
-            account_info = page.locator(".weui-desktop-account__info")
-            if await account_info.count() > 0 and await account_info.first.is_visible():
-                return True
-
-            new_create = page.get_by_text("新的创作", exact=False)
-            if await new_create.count() > 0 and await new_create.first.is_visible():
-                return True
-
-            draft_hint = page.get_by_text("近期草稿", exact=False)
-            if await draft_hint.count() > 0 and await draft_hint.first.is_visible():
-                return True
+            return await self._page_is_authenticated(page)
         except Exception as exc:
-            logger.debug("wechat_check_login_failed", error=str(exc))
-        return False
+            raise RuntimeError(
+                "NETWORK_ERROR: Unable to verify WeChat browser session"
+            ) from exc
+
+    async def refresh_session(self) -> bool:
+        """Probe a fresh home page without replacing a login or confirmation tab."""
+        context = await self.get_context()
+        page = await context.new_page()
+        try:
+            await page.goto(
+                MP_HOME_URL,
+                timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                wait_until="domcontentloaded",
+            )
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while asyncio.get_running_loop().time() < deadline:
+                if await self._page_requires_login(page):
+                    return False
+                if await self._page_is_authenticated(page):
+                    return True
+                await asyncio.sleep(0.25)
+            raise RuntimeError(
+                "PROVIDER_UI_CHANGED: WeChat session probe did not show a known page"
+            )
+        finally:
+            await page.close()
 
     async def capture_qr(self) -> str | None:
         """Locate and capture the login QR code image snippet as base64 PNG."""
         page = await self.get_page()
-        # If already on home dashboard, there is no QR code
-        if "/cgi-bin/" in page.url and "login" not in page.url:
+        try:
+            # Explicit QR refresh must renew an expired code. Background probes
+            # reuse the cached QR and do not keep interrupting a pending scan.
+            await page.goto(
+                MP_HOME_URL,
+                timeout=int(self.settings.navigation_timeout_seconds * 1000),
+                wait_until="domcontentloaded",
+            )
+        except Exception as exc:
+            logger.debug("wechat_goto_login_failed", error=safe_error_summary(exc))
             return None
 
-        try:
-            if MP_ORIGIN not in page.url or "login" not in page.url:
-                await page.goto(
-                    MP_HOME_URL,
-                    timeout=int(self.settings.navigation_timeout_seconds * 1000),
-                    wait_until="domcontentloaded",
-                )
-        except Exception as exc:
-            logger.debug("wechat_goto_login_failed", error=str(exc))
-
-        # Re-check if it redirected to authenticated home
-        if "/cgi-bin/" in page.url and "login" not in page.url:
+        if await self._page_is_authenticated(page):
             return None
 
         for selector in QR_SELECTORS:
@@ -825,14 +874,14 @@ class WeChatPublisher(BasePlatformPublisher):
         return parse_qs(urlsplit(url).query).get("token", [None])[0]
 
     async def _ensure_page_token(self, page: Any) -> str:
-        token = self._page_token(page)
-        if token:
-            return token
+        # Re-enter home to obtain the current session token; old tabs may carry
+        # a revoked token even though their URL still looks authenticated.
         await page.goto(
             MP_HOME_URL,
             timeout=int(self.settings.navigation_timeout_seconds * 1000),
             wait_until="domcontentloaded",
         )
+        await self._raise_if_auth_required(page)
         token = self._page_token(page)
         if not token:
             raise RuntimeError(
@@ -931,6 +980,7 @@ class WeChatPublisher(BasePlatformPublisher):
                 ]
 
                 for editor_page in [*reversed(new_pages), trigger_page]:
+                    await self._raise_if_auth_required(editor_page)
                     if "login" in str(getattr(editor_page, "url", "")).lower():
                         raise RuntimeError(
                             "AUTH_REQUIRED: WeChat session expired while opening API-created draft"
@@ -974,6 +1024,8 @@ class WeChatPublisher(BasePlatformPublisher):
                     "AUTH_REQUIRED: WeChat session expired while opening API-created draft"
                 )
 
+            await self._raise_if_auth_required(page)
+
             candidate_locators = [
                 page.locator(".appmsg_item"),
                 page.locator(".appmsg_title"),
@@ -984,7 +1036,7 @@ class WeChatPublisher(BasePlatformPublisher):
 
             candidate_attempted = False
             for candidates in candidate_locators:
-                with contextlib.suppress(Exception):
+                try:
                     for index in range(await candidates.count()):
                         candidate = candidates.nth(index)
                         if not await candidate.is_visible():
@@ -1026,6 +1078,7 @@ class WeChatPublisher(BasePlatformPublisher):
                                 ),
                                 wait_until="domcontentloaded",
                             )
+                            await self._raise_if_auth_required(page)
                             if await self._editor_is_ready(page):
                                 logger.info("wechat_api_draft_opened_by_title")
                                 return
@@ -1072,6 +1125,13 @@ class WeChatPublisher(BasePlatformPublisher):
                         list_loaded_at = None
                         break
 
+                except Exception as exc:
+                    if "AUTH_REQUIRED" in str(exc):
+                        raise
+                    logger.debug(
+                        "wechat_draft_candidate_failed", error=safe_error_summary(exc)
+                    )
+
                 if candidate_attempted:
                     break
 
@@ -1114,6 +1174,7 @@ class WeChatPublisher(BasePlatformPublisher):
                 timeout=int(self.settings.navigation_timeout_seconds * 1000),
                 wait_until="domcontentloaded",
             )
+            await self._raise_if_auth_required(page)
             with contextlib.suppress(Exception):
                 conflict_btn = page.locator(
                     "button:has-text('查看新草稿'), a:has-text('查看新草稿')"
@@ -1124,6 +1185,7 @@ class WeChatPublisher(BasePlatformPublisher):
                     await page.wait_for_load_state("domcontentloaded")
                     await asyncio.sleep(1.0)
 
+        await self._raise_if_auth_required(page)
         if job is not None and not await self._editor_is_ready(page):
             raise RuntimeError(
                 "DRAFT_OPEN_FAILED: WeChat draft editor did not expose a publish action"
