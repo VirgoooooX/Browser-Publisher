@@ -1,6 +1,6 @@
 [project]
 name = "browser-publisher"
-version = "0.3.1"
+version = "0.4.0"
 description = "Standalone automated browser publishing service for WeChat Official Accounts and Xiaohongshu"
 readme = "README.md"
 requires-python = ">=3.12"
