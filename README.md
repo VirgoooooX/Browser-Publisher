@@ -1,5 +1,9 @@
 # Browser Publisher
 
+<p align="center">
+  <img src="publisher/static/brand/browser-publisher.png" width="144" alt="Browser Publisher logo" />
+</p>
+
 Standalone automated browser publishing service for WeChat Official Accounts (微信公众号) and Xiaohongshu (小红书).
 
 ## 核心架构与边界
@@ -10,6 +14,8 @@ Standalone automated browser publishing service for WeChat Official Accounts (�
 - **管理控制台**：服务端轻量级 Web 控制台与 `publisher-cli` 命令行工具。
 
 ## 默认服务端口与地址
+
+通知图标位于 `publisher/static/brand/browser-publisher.png`，使用无文字的浏览器窗口与发布箭头图形。通知封面由发布器维护：登录维护为浅蓝、发布异常为浅红、发布确认为浅绿，统一采用左侧应用图标、竖线、右侧两行分类文字与小图标的布局。普通告警上传封面后通过 Notify Hub 发送图文；登录二维码继续发送原图和简短说明。标题说明平台或文章与结果，原始浏览器日志保留在控制台；媒体不可用时仍发送文字提示。
 
 - 局域网默认地址：`http://192.168.31.100:8790`
 - 内部数据目录：`/app/data`

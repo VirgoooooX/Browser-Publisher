@@ -445,13 +445,9 @@ class SerialWorker:
                         )
                         await emit_notify_hub_alert(
                             self.settings,
+                            subject=job.content.get("title"),
                             event_type="publisher.job.publish_unknown",
                             event_key=f"job-unknown-{job.id}",
-                            title=f"【{platform_name}】发布结果未知 (publish_unknown)",
-                            content=(
-                                f"任务 {job.id} 标题《{job.content.get('title')}》已点击最终发布，"
-                                f"但作品列表核对超时，未自动重新提交以防重复群发。详情：{self.settings.console_public_url}"
-                            ),
                             level="critical",
                             payload={"job_id": job.id, "platform": platform_name},
                         )
@@ -647,14 +643,9 @@ class SerialWorker:
             # Emit platform paused alert
             await emit_notify_hub_alert(
                 self.settings,
+                subject=job.content.get("title"),
                 event_type="publisher.platform.paused",
                 event_key=f"platform-paused-{platform_name}-{incident_id}",
-                title=f"【{platform_name}】触发风控，平台已自动暂停！",
-                content=(
-                    f"平台 {platform_name} 在执行任务 {job.id} 时检测到【{err_code}】异常。\n"
-                    f"错误摘要：{err_msg}\n"
-                    f"后续任务已暂停执行。请在控制台人工处理并点击【恢复发布】：{self.settings.console_public_url}"
-                ),
                 level="critical",
                 payload={
                     "platform": platform_name,
@@ -712,13 +703,9 @@ class SerialWorker:
             job.finished_at = datetime.now(UTC)
             await emit_notify_hub_alert(
                 self.settings,
+                subject=job.content.get("title"),
                 event_type="publisher.job.failed",
                 event_key=f"job-failed-{job.id}",
-                title=f"【{platform_name}】发表动作未开始",
-                content=(
-                    f"任务 {job.id} 标题《{job.content.get('title')}》尚未点击发表。\n"
-                    f"错误信息：{err_msg}\n控制台：{self.settings.console_public_url}"
-                ),
                 level="warning",
                 payload={"job_id": job.id, "error_code": err_code},
             )
@@ -731,14 +718,9 @@ class SerialWorker:
                 job.finished_at = datetime.now(UTC)
                 await emit_notify_hub_alert(
                     self.settings,
+                    subject=job.content.get("title"),
                     event_type="publisher.job.draft_unknown",
                     event_key=f"job-draft-unknown-{job.id}",
-                    title=f"【{platform_name}】草稿创建结果未知",
-                    content=(
-                        f"任务 {job.id} 标题《{job.content.get('title')}》调用微信官方 API 后未收到确定响应，"
-                        "为避免重复创建草稿，系统不会自动重试。请在公众号草稿箱核对。"
-                        f"控制台：{self.settings.console_public_url}"
-                    ),
                     level="critical",
                     payload={"job_id": job.id, "platform": platform_name},
                 )
@@ -766,13 +748,9 @@ class SerialWorker:
             job.finished_at = datetime.now(UTC)
             await emit_notify_hub_alert(
                 self.settings,
+                subject=job.content.get("title"),
                 event_type="publisher.job.publish_unknown",
                 event_key=f"job-unknown-{job.id}",
-                title=f"【{platform_name}】发布结果未知 (publish_unknown)",
-                content=(
-                    f"任务 {job.id} 标题《{job.content.get('title')}》在作品核对期间失败。\n"
-                    f"错误信息：{err_msg}\n控制台：{self.settings.console_public_url}"
-                ),
                 level="critical",
                 payload={"job_id": job.id, "platform": platform_name},
             )
@@ -789,13 +767,9 @@ class SerialWorker:
             job.finished_at = datetime.now(UTC)
             await emit_notify_hub_alert(
                 self.settings,
+                subject=job.content.get("title"),
                 event_type="publisher.job.failed",
                 event_key=f"job-failed-{job.id}",
-                title=f"【{platform_name}】任务发布失败",
-                content=(
-                    f"任务 {job.id} 标题《{job.content.get('title')}》执行失败（{err_code}）。\n"
-                    f"错误信息：{err_msg}\n控制台：{self.settings.console_public_url}"
-                ),
                 level="warning",
                 payload={"job_id": job.id, "error_code": err_code},
             )

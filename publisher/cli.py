@@ -11,13 +11,15 @@ from typing import Any
 
 import httpx
 
+from publisher import __version__
+
 
 def _get_api_client(base_url: str, token: str) -> httpx.Client:
     return httpx.Client(
         base_url=base_url.rstrip("/"),
         headers={
             "Authorization": f"Bearer {token}",
-            "User-Agent": "publisher-cli/0.3.0",
+            "User-Agent": f"publisher-cli/{__version__}",
         },
         timeout=30.0,
     )

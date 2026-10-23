@@ -1447,20 +1447,13 @@ class WeChatPublisher(BasePlatformPublisher):
 
         logger.info("wechat_admin_verification_required")
         article_title = (job.content or {}).get("title", "") or str(job.id)
-        alert_title = "【微信公众号发布】需要人工确认"
-        alert_content = (
-            f"文章《{article_title}》已经提交发表，微信要求管理员人工确认。\n"
-            "请在微信或公众号后台完成确认，系统会自动核对发表结果。\n"
-            f"任务 ID：{job.id}\n控制台：{self.settings.console_public_url}"
-        )
         from publisher.notify_alert import emit_notify_hub_alert
 
         await emit_notify_hub_alert(
             self.settings,
             event_type="publisher.wechat.manual_confirm",
+            subject=article_title,
             event_key=f"wechat_manual_confirm_{job.id}",
-            title=alert_title,
-            content=alert_content,
             level="warning",
             payload={"job_id": job.id, "platform": "wechat_mp"},
         )

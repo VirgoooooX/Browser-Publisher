@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 
+from publisher import __version__
 from publisher.config import PublisherSettings
 from publisher.models import PlatformState, PublishJob
 from publisher.security import (
@@ -36,7 +37,7 @@ def get_db(request: Request) -> object:
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
-        request=request, name="login.html", context={"error": None}
+        request=request, name="login.html", context={"error": None, "version": __version__}
     )
 
 
@@ -50,7 +51,7 @@ async def console_login(
         return templates.TemplateResponse(
             request=request,
             name="login.html",
-            context={"error": "无效的 Access Token"},
+            context={"error": "无效的 Access Token", "version": __version__},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
@@ -140,7 +141,7 @@ async def console_dashboard(
         }
 
         config_info = {
-            "version": "0.3.0",
+            "version": __version__,
             "data_dir": str(settings.data_dir),
             "port": settings.port,
             "headless": settings.headless,

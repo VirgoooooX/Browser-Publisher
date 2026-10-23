@@ -58,8 +58,6 @@ class SessionService:
                 self.settings,
                 event_type="publisher.session.recovered",
                 event_key=f"auth-recovered-{platform}-{incident}",
-                title=f"【{platform}】发布器登录态已恢复",
-                content="扫码登录已成功，等待登录的任务将从已保存的草稿继续执行。",
                 level="info",
                 payload={"platform": platform},
             )
@@ -114,11 +112,6 @@ class SessionService:
             self.settings,
             event_type="publisher.session.auth_required",
             event_key=f"auth-required-{platform}-{incident}",
-            title=f"【{platform}】发布器需要扫码登录",
-            content=(
-                "发布器网页登录已失效，待发表任务会保留草稿并等待登录。"
-                f"请打开控制台扫码，二维码过期时可在控制台刷新：{self.settings.console_public_url}"
-            ),
             level="warning",
             payload={"platform": platform, "incident_id": incident},
             image_path=image_path,

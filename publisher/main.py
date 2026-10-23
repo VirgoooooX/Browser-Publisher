@@ -17,6 +17,7 @@ from publisher.api.routes_console import router as console_router
 from publisher.api.routes_jobs import router as jobs_router
 from publisher.api.routes_media import router as media_router
 from publisher.api.routes_platforms import router as platforms_router
+from publisher import __version__
 from publisher.config import PublisherSettings
 from publisher.database import Base, create_engine_and_sessionmaker
 from publisher.migrations import upgrade_database
@@ -99,7 +100,7 @@ def create_app(settings: PublisherSettings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Browser Publisher",
-        version="0.3.0",
+        version=__version__,
         description="Automated browser publishing engine for WeChat MP & Xiaohongshu",
         lifespan=lifespan,
     )

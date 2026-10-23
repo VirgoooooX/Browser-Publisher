@@ -4,11 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Browser Publisher 控制台</title>
+  <link rel="icon" type="image/png" href="/static/brand/browser-publisher.png">
+  <link rel="apple-touch-icon" href="/static/brand/browser-publisher.png">
   <link rel="stylesheet" href="/static/console.css">
 </head>
 <body>
   <header>
     <div class="logo-area">
+      <img class="brand-logo" src="/static/brand/browser-publisher.png" alt="Browser Publisher" width="42" height="42">
       <div class="logo-icon-pulse" title="Worker 运行正常"></div>
       <span class="logo-title">Browser Publisher</span>
       <span class="logo-badge">v{{ config.version if config and config.version else '0.1.0' }}</span>

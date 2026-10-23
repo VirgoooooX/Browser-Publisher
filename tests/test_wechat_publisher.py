@@ -973,8 +973,7 @@ async def test_wechat_handle_admin_verification_flow(
         assert mock_alert.await_count == 1
         alert_kwargs = mock_alert.await_args.kwargs
         assert alert_kwargs["event_type"] == "publisher.wechat.manual_confirm"
-        assert "测试文章标题" in alert_kwargs["content"]
-        assert "二维码" not in alert_kwargs["content"]
+        assert alert_kwargs["subject"] == "测试文章标题"
         assert alert_kwargs.get("image_path") is None
 
 
