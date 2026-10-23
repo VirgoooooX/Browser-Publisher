@@ -178,6 +178,7 @@ class PlatformDetail(BaseModel):
 
 
 class PlatformListResponse(BaseModel):
+    caller_login_notifications_supported: bool = True
     platforms: list[PlatformDetail]
 
 

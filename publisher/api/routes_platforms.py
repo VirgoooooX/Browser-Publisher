@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select, update
 
 from publisher.config import PublisherSettings
@@ -56,6 +57,7 @@ async def request_platform_login(
     session_factory: Annotated[object, Depends(get_db)],
     publishers: Annotated[dict[str, object], Depends(get_publishers)],
     settings: Annotated[PublisherSettings, Depends(get_settings)],
+    notify: bool = Query(default=True),
 ) -> dict[str, Any]:
     pub = publishers.get(platform)
     if not pub:
@@ -73,6 +75,13 @@ async def request_platform_login(
         # Refresh login QR only, preserving the incident key and alert receipt.
         qr_b64 = await pub.capture_qr()
         async with session_factory() as session:
+            notification_values: dict[str, Any] = {}
+            if not notify:
+                state = await session.get(PlatformState, platform)
+                notification_values = {
+                    "alert_incident_id": (state.alert_incident_id if state else None) or f"maintenance-{uuid.uuid4().hex}",
+                    "auth_alert_sent_at": utc_now(),
+                }
             await session.execute(
                 update(PlatformState)
                 .where(PlatformState.platform == platform)
@@ -83,6 +92,7 @@ async def request_platform_login(
                     last_error_code="AUTH_REQUIRED",
                     last_error_message="请扫码登录",
                     updated_at=utc_now(),
+                    **notification_values,
                 )
             )
             await session.commit()
@@ -135,6 +145,7 @@ async def reauth_platform(
     platform: PlatformType,
     session_factory: Annotated[object, Depends(get_db)],
     publishers: Annotated[dict[str, object], Depends(get_publishers)],
+    notify: bool = Query(default=True),
 ) -> dict[str, str]:
     pub = publishers.get(platform)
     if not pub:
@@ -154,8 +165,8 @@ async def reauth_platform(
                 .values(
                     session_state="auth_required",
                     qr_code_base64=qr_b64,
-                    alert_incident_id=None,
-                    auth_alert_sent_at=None,
+                    alert_incident_id=None if notify else f"maintenance-{uuid.uuid4().hex}",
+                    auth_alert_sent_at=None if notify else utc_now(),
                     last_session_check_at=None,
                     last_error_code=None,
                     last_error_message=None,
